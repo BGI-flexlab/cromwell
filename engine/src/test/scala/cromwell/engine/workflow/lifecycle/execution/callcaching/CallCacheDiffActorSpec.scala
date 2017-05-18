@@ -3,15 +3,12 @@ package cromwell.engine.workflow.lifecycle.execution.callcaching
 import akka.testkit.{ImplicitSender, TestFSMRef, TestProbe}
 import cats.data.NonEmptyList
 import cromwell.core.{TestKitSuite, WorkflowId}
-import cromwell.engine.workflow.lifecycle.execution.callcaching.CallCacheDiffActor.{CallCacheDiffWithRequest, WaitingForMetadata}
+import cromwell.engine.workflow.lifecycle.execution.callcaching.CallCacheDiffActor._
 import cromwell.engine.workflow.lifecycle.execution.callcaching.CallCacheDiffQueryParameter.CallCacheDiffQueryCall
 import cromwell.services.metadata.MetadataService.{GetMetadataQueryAction, MetadataLookupResponse, MetadataServiceKeyLookupFailed}
 import cromwell.services.metadata._
-import cromwell.webservice.FailureResponse
-import cromwell.webservice.PerRequest.RequestComplete
 import org.scalatest.concurrent.Eventually
 import org.scalatest.{FlatSpecLike, Matchers}
-import spray.http.StatusCodes
 
 class CallCacheDiffActorSpec extends TestKitSuite with FlatSpecLike with Matchers with ImplicitSender with Eventually {
 
@@ -113,7 +110,7 @@ class CallCacheDiffActorSpec extends TestKitSuite with FlatSpecLike with Matcher
 
     actor ! MetadataLookupResponse(queryA, eventsA)
 
-    expectMsgClass(classOf[RequestComplete[_]])
+    expectMsgClass(classOf[CallCacheDiffActorResponse])
     expectTerminated(actor)
   }
 
@@ -127,16 +124,12 @@ class CallCacheDiffActorSpec extends TestKitSuite with FlatSpecLike with Matcher
 
     actor ! MetadataLookupResponse(queryB, eventsB)
 
-    expectMsgClass(classOf[RequestComplete[_]])
+    expectMsgClass(classOf[CallCacheDiffActorResponse])
     expectTerminated(actor)
   }
 
   it should "build a correct response" in {
     import cromwell.services.metadata.MetadataService.MetadataLookupResponse
-    import cromwell.webservice.PerRequest.RequestComplete
-    import cromwell.webservice.WorkflowJsonSupport._
-    import spray.http.StatusCodes
-    import spray.httpx.SprayJsonSupport._
     import spray.json._
     
     val mockServiceRegistryActor = TestProbe()
@@ -187,7 +180,7 @@ class CallCacheDiffActorSpec extends TestKitSuite with FlatSpecLike with Matcher
          |}
        """.stripMargin.parseJson.asJsObject
     
-    val expectedResponse = RequestComplete((StatusCodes.OK, expectedJson))
+    val expectedResponse = BuiltCallCacheDiffResponse(expectedJson)
     
     expectMsg(expectedResponse)
     expectTerminated(actor)
@@ -208,12 +201,10 @@ class CallCacheDiffActorSpec extends TestKitSuite with FlatSpecLike with Matcher
     actor ! responseA
 
     expectMsgPF(1 second) {
-      case RequestComplete((StatusCodes.InternalServerError, response: FailureResponse)) =>
-        response.status shouldBe "error"
-        response.message shouldBe "Query lookup failed - but it's ok ! this is a test !"
+      case FailedCallCacheDiffResponse(e: Throwable) =>
+        e.getMessage shouldBe "Query lookup failed - but it's ok ! this is a test !"
     }
     
     expectTerminated(actor)
   }
-
 }

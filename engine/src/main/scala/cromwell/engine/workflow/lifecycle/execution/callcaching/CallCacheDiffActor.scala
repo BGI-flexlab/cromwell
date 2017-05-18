@@ -10,13 +10,9 @@ import cromwell.engine.workflow.lifecycle.execution.callcaching.CallCacheDiffQue
 import cromwell.services.metadata.CallMetadataKeys.CallCachingKeys
 import cromwell.services.metadata.MetadataService.{GetMetadataQueryAction, MetadataLookupResponse, MetadataServiceKeyLookupFailed}
 import cromwell.services.metadata._
-import cromwell.webservice.APIResponse
-import cromwell.webservice.PerRequest.RequestComplete
-import cromwell.webservice.WorkflowJsonSupport._
 import cromwell.webservice.metadata.MetadataComponent._
 import cromwell.webservice.metadata._
-import spray.http.StatusCodes
-import spray.httpx.SprayJsonSupport._
+import spray.json.JsObject
 
 import scala.language.postfixOps
 
@@ -35,6 +31,11 @@ object CallCacheDiffActor {
                                       responseB: Option[MetadataLookupResponse],
                                       replyTo: ActorRef
                                      ) extends CallCacheDiffActorData
+
+  sealed abstract class CallCacheDiffActorResponse
+  case class BuiltCallCacheDiffResponse(response: JsObject) extends CallCacheDiffActorResponse
+  case class FailedCallCacheDiffResponse(reason: Throwable) extends CallCacheDiffActorResponse
+
 
   def props(serviceRegistryActor: ActorRef) = Props(new CallCacheDiffActor(serviceRegistryActor))
 }
@@ -67,7 +68,7 @@ class CallCacheDiffActor(serviceRegistryActor: ActorRef) extends LoggingFSM[Call
     case Event(response: MetadataLookupResponse, CallCacheDiffWithRequest(queryA, queryB, Some(responseA), None, replyTo)) if queryB == response.query =>
       buildDiffAndRespond(queryA, queryB, responseA, response, replyTo)
     case Event(MetadataServiceKeyLookupFailed(_, failure), data: CallCacheDiffWithRequest) =>
-      data.replyTo ! RequestComplete((StatusCodes.InternalServerError, APIResponse.error(failure)))
+      data.replyTo ! FailedCallCacheDiffResponse(failure)
       context stop self
       stay()
   }
@@ -105,7 +106,7 @@ class CallCacheDiffActor(serviceRegistryActor: ActorRef) extends LoggingFSM[Call
       "hashDifferential" -> diffHashes(responseA.eventList, responseB.eventList)
     ))
 
-    replyTo ! RequestComplete((StatusCodes.OK, metadataComponentJsonWriter.write(response).asJsObject))
+    replyTo ! BuiltCallCacheDiffResponse(metadataComponentJsonWriter.write(response).asJsObject)
 
     context stop self
     stay()
