@@ -11,7 +11,7 @@ import cromwell.services.metadata.MetadataService._
 import org.scalatest.{FlatSpec, Matchers}
 import spray.http._
 import spray.json.DefaultJsonProtocol._
-import spray.json.{JsString, _}
+import spray.json._
 import spray.routing._
 import cromwell.engine.workflow.workflowstore.WorkflowStoreSubmitActor.{WorkflowSubmittedToStore, WorkflowsBatchSubmittedToStore}
 import cromwell.util.SampleWdl.HelloWorld
@@ -421,7 +421,7 @@ class CromwellApiServiceSpec extends FlatSpec with ScalatestRouteTest with Match
       }
   }
 
-  behavior of "REST API /label/add POST endpoint"
+  behavior of "REST API /labels PATCH endpoint"
   it should "return successful status response when assigning valid labels to an existing workflow ID" in {
 
     val validLabelsJson =
@@ -435,7 +435,7 @@ class CromwellApiServiceSpec extends FlatSpec with ScalatestRouteTest with Match
     val workflowId = MockApiService.ExistingWorkflowId
 
     Post(s"/workflows/$version/$workflowId/addLabels", HttpEntity(ContentTypes.`application/json`, validLabelsJson)) ~>
-      cromwellApiService.addLabelRoute ~>
+      cromwellApiService.addLabelsRoute ~>
       check {
         status shouldBe StatusCodes.OK
         val result = responseAs[JsObject]
@@ -456,21 +456,18 @@ class CromwellApiServiceSpec extends FlatSpec with ScalatestRouteTest with Match
     val workflowId = MockApiService.AbortedWorkflowId
 
     Post(s"/workflows/$version/$workflowId/addLabels", HttpEntity(ContentTypes.`application/json`, validLabelsJson)) ~>
-      cromwellApiService.addLabelRoute ~>
+      cromwellApiService.addLabelsRoute ~>
       check {
         status shouldBe StatusCodes.InternalServerError
         val actualResult = responseAs[JsObject]
         val expectedResult =
-          s"""
-            |{
-            |  "status": "fail",
-            |  "message": "Can't find metadata service to update labels for ${MockApiService.AbortedWorkflowId} due to mock exception of db failure"
-            |}
-          """.stripMargin
+          s"""{
+              |  "status": "fail",
+              |  "message": "Can't find metadata service to update labels for ${MockApiService.AbortedWorkflowId} due to mock exception of db failure"
+              |}
+            """.stripMargin.parseJson
 
         actualResult shouldBe expectedResult
-
-        println(s"${actualResult.prettyPrint}")
       }
   }
 }
@@ -579,7 +576,7 @@ object CromwellApiServiceSpec {
 
   class MockServiceRegistryActor extends Actor {
     override def receive = {
-      case AddLabelsToWorkflowMetadata(id, events, labels) =>
+      case LabelAddition(id, labels) =>
         id match {
           case MockApiService.ExistingWorkflowId =>
             sender ! LabelUpdateSuccess(id.toString, labels.asMap)
