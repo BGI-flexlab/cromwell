@@ -78,7 +78,6 @@ printTravisHeartbeat
 set -x
 set -e
 
-// Setup mysql
 sudo apt-get update -qq
 sudo apt-get install -qq mysql-server-5.6 mysql-client-5.6 mysql-client-core-5.6
 docker pull ubuntu:latest
