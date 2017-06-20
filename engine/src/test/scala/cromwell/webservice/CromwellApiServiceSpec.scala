@@ -438,8 +438,19 @@ class CromwellApiServiceSpec extends FlatSpec with ScalatestRouteTest with Match
       cromwellApiService.patchLabelsRoute ~>
       check {
         status shouldBe StatusCodes.OK
-        val result = responseAs[JsObject]
-        result.fields.keys should contain allOf("id", "labels")
+        val actualResult = responseAs[JsObject]
+        val expectedResults =
+          s"""
+            |{
+            |  "id": "${workflowId}",
+            |  "labels": {
+            |    "label-key-1":"label-value-1",
+            |    "label-key-2":"label-value-2"
+            |  }
+            |}
+          """.stripMargin.parseJson
+
+        actualResult shouldBe expectedResults
       }
   }
 
