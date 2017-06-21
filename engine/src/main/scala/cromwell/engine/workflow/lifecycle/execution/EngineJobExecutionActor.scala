@@ -68,7 +68,7 @@ class EngineJobExecutionActor(replyTo: ActorRef,
   // NB: this can also change (e.g. if we have a HashError we just force this to CallCachingOff)
   private var effectiveCallCachingMode = {
     if (factory.fileHashingActorProps.isEmpty) CallCachingOff
-    else if (factory.cacheHitCopyingActorProps.isEmpty || jobDescriptorKey.attempt > 1) {
+    else if (factory.cacheHitCopyingActorProps.isEmpty || jobDescriptorKey.attempt > 1 || restarting) {
       callCachingMode.withoutRead
     } else callCachingMode
   }
