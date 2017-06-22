@@ -46,6 +46,8 @@ final case class ExecutionStore(private val statusStore: Map[JobKey, ExecutionSt
 
   private def keysWithStatus(status: ExecutionStatus) = store.getOrElse(status, List.empty)
 
+  private def ignoreCollectorKeys(keys: List[JobKey]): List[JobKey] = keys.filter(!_.tag.contains("Collector-"))
+
   def isBypassedConditional(jobKey: JobKey, conditional: If): Boolean = {
     keysWithStatus(Bypassed).exists {
       case key: ConditionalKey =>
@@ -63,7 +65,7 @@ final case class ExecutionStore(private val statusStore: Map[JobKey, ExecutionSt
     keysWithStatus(QueuedInCromwell).nonEmpty ||
       keysWithStatus(Starting).nonEmpty ||
       keysWithStatus(Running).nonEmpty ||
-      keysWithStatus(NotStarted).exists(jobKey => !upstreamFailed(jobKey.scope))
+      ignoreCollectorKeys(keysWithStatus(NotStarted)).exists(jobKey => !upstreamFailed(jobKey.scope))
   }
 
   def jobStatus(jobKey: JobKey): Option[ExecutionStatus] = statusStore.get(jobKey)
