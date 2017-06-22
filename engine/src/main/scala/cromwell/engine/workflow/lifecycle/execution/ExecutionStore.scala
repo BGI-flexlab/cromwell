@@ -44,9 +44,10 @@ final case class ExecutionStore(private val statusStore: Map[JobKey, ExecutionSt
     (key.scope.fullyQualifiedName, key.index) -> key
   } toMap
 
-  private def keysWithStatus(status: ExecutionStatus) = store.getOrElse(status, List.empty)
+  lazy val terminalKeys: Set[FqnIndex] = store.filterKeys(_.isTerminal).values.flatten.map { key =>
+    (key.scope.fullyQualifiedName, key.index) } toSet
 
-  private def ignoreCollectorKeys(keys: List[JobKey]): List[JobKey] = keys.filter(!_.tag.contains("Collector-"))
+  private def keysWithStatus(status: ExecutionStatus) = store.getOrElse(status, List.empty)
 
   def isBypassedConditional(jobKey: JobKey, conditional: If): Boolean = {
     keysWithStatus(Bypassed).exists {
@@ -65,7 +66,7 @@ final case class ExecutionStore(private val statusStore: Map[JobKey, ExecutionSt
     keysWithStatus(QueuedInCromwell).nonEmpty ||
       keysWithStatus(Starting).nonEmpty ||
       keysWithStatus(Running).nonEmpty ||
-      ignoreCollectorKeys(keysWithStatus(NotStarted)).exists(jobKey => !upstreamFailed(jobKey.scope))
+      keysWithStatus(NotStarted).exists(jobKey => !upstreamFailed(jobKey.scope))
   }
 
   def jobStatus(jobKey: JobKey): Option[ExecutionStatus] = statusStore.get(jobKey)
@@ -117,12 +118,12 @@ final case class ExecutionStore(private val statusStore: Map[JobKey, ExecutionSt
       case _ => true
     }
 
-    val shardEntriesForCollectorAreDone: Boolean = key match {
-      case collector: CollectorKey => emulateShardEntries(collector).diff(doneKeys.keys.toSet).isEmpty
+    val shardEntriesForCollectorAreTerminal: Boolean = key match {
+      case collector: CollectorKey => emulateShardEntries(collector).diff(terminalKeys).isEmpty
       case _ => true
     }
 
-    shardEntriesForCollectorAreDone && upstreamAreDone
+    shardEntriesForCollectorAreTerminal && upstreamAreDone
   }
 
   private def upstreamIsDone(entry: JobKey, prerequisiteScope: Scope): Boolean = {
