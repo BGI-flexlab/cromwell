@@ -9,6 +9,9 @@ task centaur {
         # start mysql server
         mysqld &
         
+        # give time to server to start
+        sleep 10
+        
         # setup mysql
         mysql -u root -e "SET GLOBAL sql_mode = 'STRICT_ALL_TABLES';"
         mysql -u root -e "CREATE DATABASE IF NOT EXISTS cromwell_test;"
