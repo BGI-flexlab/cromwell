@@ -89,7 +89,6 @@ class EngineJobExecutionActor(replyTo: ActorRef,
 
   override def preStart() = {
     log.debug(s"$tag: $effectiveCallCachingKey: $effectiveCallCachingMode")
-    writeCallCachingModeToMetadata()
   }
 
   startWith(Pending, NoData)
@@ -121,6 +120,7 @@ class EngineJobExecutionActor(replyTo: ActorRef,
   // When CheckingJobStore, the FSM always has NoData
   when(CheckingJobStore) {
     case Event(JobNotComplete, NoData) =>
+      writeCallCachingModeToMetadata()
       prepareJob()
     case Event(JobComplete(jobResult), NoData) =>
       val response = jobResult match {
@@ -132,6 +132,7 @@ class EngineJobExecutionActor(replyTo: ActorRef,
       }
       respondAndStop(response)
     case Event(f: JobStoreReadFailure, NoData) =>
+      writeCallCachingModeToMetadata()
       log.error(f.reason, "{}: Error reading from JobStore", tag)
       // Escalate
       throw new RuntimeException(f.reason)
@@ -402,8 +403,7 @@ class EngineJobExecutionActor(replyTo: ActorRef,
 
   def writeCallCachingModeToMetadata(): Unit = {
     writeToMetadata(Map(effectiveCallCachingKey -> effectiveCallCachingMode.toString))
-    // If a call was flagged as non-reusable already, we don't want to override that on restart
-    if (!restarting) writeToMetadata(Map(callCachingAllowReuseMetadataKey -> effectiveCallCachingMode.writeToCache))
+    writeToMetadata(Map(callCachingAllowReuseMetadataKey -> effectiveCallCachingMode.writeToCache))
   }
 
   def createJobPreparationActor(jobPrepProps: Props, name: String): ActorRef = context.actorOf(jobPrepProps, name)
