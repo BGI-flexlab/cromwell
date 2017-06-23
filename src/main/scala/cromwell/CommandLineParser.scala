@@ -16,7 +16,7 @@ object CommandLineParser extends App {
                                   workflowOptions: Option[Path] = None,
                                   workflowType: Option[String] = Option("WDL"),
                                   workflowTypeVersion: Option[String] = Option("v2.0-draft"),
-                                  labels: Option[Path] = None,
+                                  workflowLabels: Option[Path] = None,
                                   imports: Option[Path] = None,
                                   metadataOutput: Option[Path] = None
                                  )
@@ -78,7 +78,7 @@ object CommandLineParser extends App {
               c.copy(workflowTypeVersion = Option(s))),
           opt[String]('l', "labels").text("Workflow labels file.").
             action((s, c) =>
-              c.copy(labels = Option(DefaultPathBuilder.get(s)))),
+              c.copy(workflowLabels = Option(DefaultPathBuilder.get(s)))),
           opt[String]('p', "imports").text(
             "A directory or zipfile to search for workflow imports.").
             action((s, c) =>

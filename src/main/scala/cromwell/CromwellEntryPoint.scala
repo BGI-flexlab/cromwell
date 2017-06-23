@@ -23,11 +23,17 @@ import scala.util.{Failure, Success, Try}
 
 object CromwellEntryPoint {
 
+  /**
+    * Run Cromwell in server mode.
+    */
   def runServer() = {
     val system = buildCromwellSystem(Server)
     waitAndExit(CromwellServer.run, system)
   }
 
+  /**
+    * Run a single workflow using the successfully parsed but as yet not validated arguments.
+    */
   def runSingle(args: CommandLineArguments): Unit = {
     val cromwellSystem = buildCromwellSystem(Run)
     implicit val actorSystem = cromwellSystem.actorSystem
@@ -43,7 +49,16 @@ object CromwellEntryPoint {
 
   private def buildCromwellSystem(command: Command): CromwellSystem = {
     initLogging(command)
-    buildCromwellSystem
+    lazy val Log = LoggerFactory.getLogger("cromwell")
+    Try {
+      new CromwellSystem {}
+    } recoverWith {
+      case t: Throwable =>
+        Log.error("Failed to instantiate Cromwell System. Shutting down Cromwell.")
+        Log.error(t.getMessage)
+        System.exit(1)
+        Failure(t)
+    } get
   }
   /**
     * If a cromwell server is going to be run, makes adjustments to the default logback configuration.
@@ -82,20 +97,6 @@ object CromwellEntryPoint {
     ConfigFactory.invalidateCaches()
   }
 
-  def buildCromwellSystem: CromwellSystem = {
-    lazy val Log = LoggerFactory.getLogger("cromwell")
-
-    Try {
-      new CromwellSystem {}
-    } recoverWith {
-      case t: Throwable =>
-        Log.error("Failed to instantiate Cromwell System. Shutting down Cromwell.")
-        Log.error(t.getMessage)
-        System.exit(1)
-        Failure(t)
-    } get
-  }
-
   private def waitAndExit(runner: CromwellSystem => Future[Any], workflowManagerSystem: CromwellSystem): Unit = {
     val futureResult = runner(workflowManagerSystem)
     Await.ready(futureResult, Duration.Inf)
@@ -122,7 +123,7 @@ object CromwellEntryPoint {
     val workflowSource = readContent("Workflow source", args.workflowSource.get)
     val inputsJson = readJson("Workflow inputs", args.workflowInputs)
     val optionsJson = readJson("Workflow options", args.workflowOptions)
-    val labelsJson = readJson("Labels", args.labels)
+    val labelsJson = readJson("Workflow labels", args.workflowLabels)
 
     val sourceFileCollection = args.imports match {
       case Some(p) => (workflowSource |@| inputsJson |@| optionsJson |@| labelsJson) map { (w, i, o, l) =>
