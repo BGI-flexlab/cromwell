@@ -120,7 +120,6 @@ class EngineJobExecutionActor(replyTo: ActorRef,
   // When CheckingJobStore, the FSM always has NoData
   when(CheckingJobStore) {
     case Event(JobNotComplete, NoData) =>
-      writeCallCachingModeToMetadata()
       prepareJob()
     case Event(JobComplete(jobResult), NoData) =>
       val response = jobResult match {
@@ -408,6 +407,7 @@ class EngineJobExecutionActor(replyTo: ActorRef,
 
   def createJobPreparationActor(jobPrepProps: Props, name: String): ActorRef = context.actorOf(jobPrepProps, name)
   def prepareJob() = {
+    writeCallCachingModeToMetadata()
     val jobPreparationActorName = s"BackendPreparationActor_for_$jobTag"
     val jobPrepProps = JobPreparationActor.props(executionData, jobDescriptorKey, factory, workflowDockerLookupActor = workflowDockerLookupActor,
       initializationData, serviceRegistryActor = serviceRegistryActor, ioActor = ioActor, backendSingletonActor = backendSingletonActor)
