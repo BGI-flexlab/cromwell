@@ -402,7 +402,8 @@ class EngineJobExecutionActor(replyTo: ActorRef,
 
   def writeCallCachingModeToMetadata(): Unit = {
     writeToMetadata(Map(effectiveCallCachingKey -> effectiveCallCachingMode.toString))
-    writeToMetadata(Map(callCachingAllowReuseMetadataKey -> effectiveCallCachingMode.writeToCache))
+    // If a call was flagged as non-reusable already, we don't want to override that on restart
+    if (!restarting) writeToMetadata(Map(callCachingAllowReuseMetadataKey -> effectiveCallCachingMode.writeToCache))
   }
 
   def createJobPreparationActor(jobPrepProps: Props, name: String): ActorRef = context.actorOf(jobPrepProps, name)
