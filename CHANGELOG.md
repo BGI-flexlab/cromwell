@@ -2,6 +2,11 @@
 
 ## 28
 
+### Command Line Usage
+
+Command line usage has been extensively revised for Cromwell 28.  Please see the
+[README](https://github.com/broadinstitute/cromwell#command-line-usage) for details.
+
 ### Call Caching
 
 * Hash values calculated by Cromwell for a call when call caching is enabled are now published to the metadata.
