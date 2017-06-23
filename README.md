@@ -139,7 +139,7 @@ See the [migration document](MIGRATION.md) for more details.
 
 # Command Line Usage
 
-To run Cromwell, first run the JAR file with no arguments:
+For built-in documentation of Cromwell command line usage, run the Cromwell JAR file with no arguments:
 
 ```
 $ java -jar cromwell-<versionNumber>.jar
@@ -204,7 +204,7 @@ ignored and internally the value `WDL` is used.
 An optional parameter to specify the version of the language for the workflow source.  Currently any specified value is ignored.
 
 ### --labels
-An optional parameter to specify of a file of JSON key-value pairs to associate with the workflow.
+An optional parameter to specify a file of JSON key-value label pairs to associate with the workflow.
 
 ### --imports
 You have the option of importing WDL workflows or tasks to use within your workflow, known as sub-workflows.
