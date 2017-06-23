@@ -25,30 +25,33 @@ object CommandLineParser extends App {
 
   case class ParserAndCommand(parser: OptionParser[CommandLineArguments], command: Option[Command])
 
-//   cromwell 28-5071e39-SNAP
+//   cromwell 28-6ace4bc-SNAP
 //
-//   Usage: cromwell [server|run] [options] <args>...
+//   Usage: java -jar /path/to/cromwell.jar [server|run] [options] <args>...
 //
-//     --help                   Cromwell - Lord Protector / Workflow Execution Engine
+//
+//     --help                   Cromwell - Workflow Execution Engine
 //     --version
 //   Command: server
 //   Starts a web server on port 8000.  See the web server documentation for more details about the API endpoints.
 //   Command: run [options] workflow-source
-//   Run the workflow locally and print out the outputs in JSON format.
+//   Run the workflow and print out the outputs in JSON format.
 //     workflow-source          Workflow source file.
 //     -i, --inputs <value>     Workflow inputs file.
 //     -o, --options <value>    Workflow options file.
 //     -t, --type <value>       Workflow type.
 //     -v, --type-version <value>
 //                              Workflow type version.
-//     -l, --labels <value>     Labels file.
+//     -l, --labels <value>     Workflow labels file.
 //     -p, --imports <value>    A directory or zipfile to search for workflow imports.
+//     -m, --metadata-output <value>
+//                              An optional directory path to output metadata.
 
   def buildParser(): scopt.OptionParser[CommandLineArguments] = {
-    new scopt.OptionParser[CommandLineArguments]("cromwell") {
+    new scopt.OptionParser[CommandLineArguments]("java -jar /path/to/cromwell.jar") {
       head("cromwell", cromwellVersion)
 
-      help("help").text("Cromwell - Lord Protector / Workflow Execution Engine")
+      help("help").text("Cromwell - Workflow Execution Engine")
 
       version("version")
 
@@ -57,7 +60,7 @@ object CommandLineParser extends App {
 
       cmd("run").
         action((_, c) => c.copy(command = Option(Run))).
-        text("Run the workflow locally and print out the outputs in JSON format.").
+        text("Run the workflow and print out the outputs in JSON format.").
         children(
           arg[String]("workflow-source").text("Workflow source file.").required().
             action((s, c) => c.copy(workflowSource = Option(DefaultPathBuilder.get(s)))),
@@ -73,7 +76,7 @@ object CommandLineParser extends App {
           opt[String]('v', "type-version").text("Workflow type version.").
             action((s, c) =>
               c.copy(workflowTypeVersion = Option(s))),
-          opt[String]('l', "labels").text("Labels file.").
+          opt[String]('l', "labels").text("Workflow labels file.").
             action((s, c) =>
               c.copy(labels = Option(DefaultPathBuilder.get(s)))),
           opt[String]('p', "imports").text(
