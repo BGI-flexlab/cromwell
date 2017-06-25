@@ -40,12 +40,18 @@ final case class ExecutionStore(private val statusStore: Map[JobKey, ExecutionSt
   // Takes only keys that are done, and creates a map such that they're indexed by fqn and index
   // This allows for quicker lookup (by hash) instead of traversing the whole list and yields
   // significant improvements at large scale (run ExecutionStoreBenchmark)
-  lazy val doneKeys: Map[FqnIndex, JobKey] = store.filterKeys(_.isDoneOrBypassed).values.flatten.map { key =>
-    (key.scope.fullyQualifiedName, key.index) -> key
-  } toMap
+  val (doneKeys, terminalKeys) = {
+    def toMapEntry(key: JobKey) = (key.scope.fullyQualifiedName, key.index) -> key
 
-  lazy val terminalKeys: Set[FqnIndex] = store.filterKeys(_.isTerminal).values.flatten.map { key =>
-    (key.scope.fullyQualifiedName, key.index) } toSet
+    store.foldLeft((Map.empty[FqnIndex, JobKey], Map.empty[FqnIndex, JobKey]))({
+      case ((done, terminal), (status, keys))  =>
+        val newMapEntries = keys map toMapEntry
+        val newDone = if (status.isDoneOrBypassed) done ++ newMapEntries else done
+        val newTerminal = if (status.isTerminal) terminal ++ newMapEntries else terminal
+
+        newDone -> newTerminal
+    })
+  }
 
   private def keysWithStatus(status: ExecutionStatus) = store.getOrElse(status, List.empty)
 
