@@ -39,7 +39,7 @@ final case class ExecutionStore(private val statusStore: Map[JobKey, ExecutionSt
   // Takes only keys that are done, and creates a map such that they're indexed by fqn and index
   // This allows for quicker lookup (by hash) instead of traversing the whole list and yields
   // significant improvements at large scale (run ExecutionStoreBenchmark)
-  val (doneKeys, terminalKeys) = {
+  lazy val (doneKeys, terminalKeys) = {
     def toMapEntry(key: JobKey) = (key.scope.fullyQualifiedName, key.index) -> key
 
     store.foldLeft((Map.empty[FqnIndex, JobKey], Map.empty[FqnIndex, JobKey]))({
