@@ -1,31 +1,63 @@
 package cromwell.filesystems.gcs
 
+import com.google.api.gax.retrying.RetrySettings
+import com.google.api.services.storage.model.StorageObject
+import com.google.auth.Credentials
+import com.google.auth.oauth2.ServiceAccountCredentials
 import com.google.cloud.NoCredentials
-import com.google.cloud.storage.contrib.nio.CloudStorageConfiguration
+import com.google.cloud.storage.Blob
+import com.google.cloud.storage.contrib.nio.{CloudStorageConfiguration, CloudStorageFileSystemProvider}
+import common.mock.MockSugar.mock
+import cromwell.cloudsupport.gcp.auth.ServiceAccountTestSupport
+import cromwell.cloudsupport.gcp.gcs.GcsStorage
 import cromwell.core.path._
 import cromwell.core.{TestKitSuite, WorkflowOptions}
-import cromwell.filesystems.gcs.auth.GoogleAuthModeSpec
+import org.mockito.Mockito.when
+import org.scalatest.flatspec.AnyFlatSpecLike
+import org.scalatest.matchers.should.Matchers
 import org.scalatest.prop.Tables.Table
-import org.scalatest.{FlatSpecLike, Matchers}
 
-class GcsPathBuilderSpec extends TestKitSuite with FlatSpecLike with Matchers with PathBuilderSpecUtils {
+import java.io.ByteArrayInputStream
+
+class GcsPathBuilderSpec
+    extends TestKitSuite
+    with AnyFlatSpecLike
+    with Matchers
+    with PathBuilderSpecUtils
+    with ServiceAccountTestSupport {
 
   behavior of "GcsPathBuilder"
 
   it should "use google project credentials when provided in the workflow options" in {
-    GoogleAuthModeSpec.assumeHasApplicationDefaultCredentials()
-
     val wfOptionsWithProject = WorkflowOptions.fromMap(Map("google_project" -> "my_project")).get
 
-    val gcsPathBuilderWithProjectInfo = GcsPathBuilder.fromCredentials(
-      NoCredentials.getInstance(),
-      "cromwell-test",
-      None,
-      CloudStorageConfiguration.DEFAULT,
-      wfOptionsWithProject
-    )
+    val gcsPathBuilderWithProjectInfo = MockGcsPathBuilder.withOptions(wfOptionsWithProject)
 
     gcsPathBuilderWithProjectInfo.projectId shouldBe "my_project"
+  }
+
+  it should "create a fingerprint for a StorageObject" in {
+    val storageObject = mock[StorageObject]
+    when(storageObject.getBucket).thenReturn("myBucket")
+    when(storageObject.getName).thenReturn("myBlobDir/myBlob.txt")
+    when(storageObject.getGeneration).thenReturn(123456L)
+    GcsPath.getBlobFingerprint(storageObject) shouldBe Some("05B44C2CC99C109C7970BB7725DC08B6")
+  }
+
+  it should "create a fingerprint for a Blob" in {
+    val blob = mock[Blob]
+    when(blob.getBucket).thenReturn("myBucket")
+    when(blob.getName).thenReturn("myBlobDir/myBlob.txt")
+    when(blob.getGeneration).thenReturn(123456L)
+    GcsPath.getBlobFingerprint(blob) shouldBe Some("05B44C2CC99C109C7970BB7725DC08B6")
+  }
+
+  it should "create a fingerprint for a Storage Object with a null field" in {
+    val storageObject = mock[StorageObject]
+    when(storageObject.getBucket).thenReturn("myBucket")
+    when(storageObject.getName).thenReturn(null)
+    when(storageObject.getGeneration).thenReturn(123456L)
+    GcsPath.getBlobFingerprint(storageObject) shouldBe None
   }
 
   it should behave like truncateCommonRoots(pathBuilder, pathsToTruncate)
@@ -64,14 +96,9 @@ class GcsPathBuilderSpec extends TestKitSuite with FlatSpecLike with Matchers wi
       root = s"gs://$bucket/",
       name = "with spaces",
       getFileName = s"gs://$bucket/with spaces",
-      toUriHost = bucket,
-      toUriPath = "/hello/world/with%20spaces",
-      toUriStartsWith = s"gs://$bucket/hello/world/with%20spaces",
-      toUriEndsWith = s"gs://$bucket/hello/world/with%20spaces",
       getNameCount = 3,
-      isAbsolute = true,
-      isDirectory = false),
-
+      isAbsolute = true
+    ),
     GoodPath(
       description = "a path with non-ascii",
       path = s"gs://$bucket/hello/world/with non ascii £€",
@@ -83,14 +110,9 @@ class GcsPathBuilderSpec extends TestKitSuite with FlatSpecLike with Matchers wi
       root = s"gs://$bucket/",
       name = "with non ascii £€",
       getFileName = s"gs://$bucket/with non ascii £€",
-      toUriHost = bucket,
-      toUriPath = "/hello/world/with%20non%20ascii%20£€",
-      toUriStartsWith = s"gs://$bucket/hello/world/with%20non%20ascii%20£€",
-      toUriEndsWith = s"gs://$bucket/hello/world/with%20non%20ascii%20£€",
       getNameCount = 3,
-      isAbsolute = true,
-      isDirectory = false),
-
+      isAbsolute = true
+    ),
     GoodPath(
       description = "a gs uri path with encoded characters",
       path = s"gs://$bucket/hello/world/encoded%20spaces",
@@ -102,14 +124,9 @@ class GcsPathBuilderSpec extends TestKitSuite with FlatSpecLike with Matchers wi
       root = s"gs://$bucket/",
       name = "encoded%20spaces",
       getFileName = s"gs://$bucket/encoded%20spaces",
-      toUriHost = bucket,
-      toUriPath = "/hello/world/encoded%2520spaces",
-      toUriStartsWith = s"gs://$bucket/hello/world/encoded%2520spaces",
-      toUriEndsWith = s"gs://$bucket/hello/world/encoded%2520spaces",
       getNameCount = 3,
-      isAbsolute = true,
-      isDirectory = false),
-
+      isAbsolute = true
+    ),
     GoodPath(
       description = "a bucket only path",
       path = s"gs://$bucket",
@@ -121,14 +138,9 @@ class GcsPathBuilderSpec extends TestKitSuite with FlatSpecLike with Matchers wi
       root = s"gs://$bucket/",
       name = "",
       getFileName = s"gs://$bucket/",
-      toUriHost = bucket,
-      toUriPath = "/",
-      toUriStartsWith = s"gs://$bucket/",
-      toUriEndsWith = s"gs://$bucket/",
       getNameCount = 1,
-      isAbsolute = false,
-      isDirectory = true),
-
+      isAbsolute = false
+    ),
     GoodPath(
       description = "a bucket only path ending in a /",
       path = s"gs://$bucket/",
@@ -140,14 +152,9 @@ class GcsPathBuilderSpec extends TestKitSuite with FlatSpecLike with Matchers wi
       root = s"gs://$bucket/",
       name = "",
       getFileName = null,
-      toUriHost = bucket,
-      toUriPath = "/",
-      toUriStartsWith = s"gs://$bucket/",
-      toUriEndsWith = s"gs://$bucket/",
       getNameCount = 0,
-      isAbsolute = true,
-      isDirectory = true),
-
+      isAbsolute = true
+    ),
     GoodPath(
       description = "a file at the top of the bucket",
       path = s"gs://$bucket/hello",
@@ -159,14 +166,9 @@ class GcsPathBuilderSpec extends TestKitSuite with FlatSpecLike with Matchers wi
       root = s"gs://$bucket/",
       name = "hello",
       getFileName = s"gs://$bucket/hello",
-      toUriHost = bucket,
-      toUriPath = "/hello",
-      toUriStartsWith = s"gs://$bucket/hello",
-      toUriEndsWith = s"gs://$bucket/hello",
       getNameCount = 1,
-      isAbsolute = true,
-      isDirectory = false),
-
+      isAbsolute = true
+    ),
     GoodPath(
       description = "a path ending in /",
       path = s"gs://$bucket/hello/world/",
@@ -178,13 +180,9 @@ class GcsPathBuilderSpec extends TestKitSuite with FlatSpecLike with Matchers wi
       root = s"gs://$bucket/",
       name = "world",
       getFileName = s"gs://$bucket/world",
-      toUriHost = bucket,
-      toUriPath = "/hello/world/",
-      toUriStartsWith = s"gs://$bucket/hello/world/",
-      toUriEndsWith = s"gs://$bucket/hello/world/",
       getNameCount = 2,
-      isAbsolute = true,
-      isDirectory = true),
+      isAbsolute = true
+    ),
 
     // Special paths
 
@@ -199,14 +197,9 @@ class GcsPathBuilderSpec extends TestKitSuite with FlatSpecLike with Matchers wi
       root = s"gs://$bucket/",
       name = "",
       getFileName = s"gs://$bucket/.",
-      toUriHost = bucket,
-      toUriPath = "/.",
-      toUriStartsWith = s"gs://$bucket/.",
-      toUriEndsWith = s"gs://$bucket/.",
       getNameCount = 1,
-      isAbsolute = true,
-      isDirectory = true),
-
+      isAbsolute = true
+    ),
     GoodPath(
       description = "a bucket with a path ..",
       path = s"gs://$bucket/..",
@@ -218,14 +211,9 @@ class GcsPathBuilderSpec extends TestKitSuite with FlatSpecLike with Matchers wi
       root = null,
       name = "",
       getFileName = s"gs://$bucket/..",
-      toUriHost = bucket,
-      toUriPath = "/..",
-      toUriStartsWith = s"gs://$bucket/..",
-      toUriEndsWith = s"gs://$bucket/..",
       getNameCount = 1,
-      isAbsolute = true,
-      isDirectory = true),
-
+      isAbsolute = true
+    ),
     GoodPath(
       description = "a bucket including . in the path",
       path = s"gs://$bucket/hello/./world",
@@ -237,14 +225,9 @@ class GcsPathBuilderSpec extends TestKitSuite with FlatSpecLike with Matchers wi
       root = s"gs://$bucket/",
       name = "world",
       getFileName = s"gs://$bucket/world",
-      toUriHost = bucket,
-      toUriPath = "/hello/./world",
-      toUriStartsWith = s"gs://$bucket/hello/./world",
-      toUriEndsWith = s"gs://$bucket/hello/./world",
       getNameCount = 3,
-      isAbsolute = true,
-      isDirectory = false),
-
+      isAbsolute = true
+    ),
     GoodPath(
       description = "a bucket including .. in the path",
       path = s"gs://$bucket/hello/../world",
@@ -256,13 +239,9 @@ class GcsPathBuilderSpec extends TestKitSuite with FlatSpecLike with Matchers wi
       root = s"gs://$bucket/",
       name = "world",
       getFileName = s"gs://$bucket/world",
-      toUriHost = bucket,
-      toUriPath = "/hello/../world",
-      toUriStartsWith = s"gs://$bucket/hello/../world",
-      toUriEndsWith = s"gs://$bucket/hello/../world",
       getNameCount = 3,
-      isAbsolute = true,
-      isDirectory = false),
+      isAbsolute = true
+    ),
 
     // Normalized
 
@@ -277,14 +256,9 @@ class GcsPathBuilderSpec extends TestKitSuite with FlatSpecLike with Matchers wi
       root = s"gs://$bucket/",
       name = "",
       getFileName = null,
-      toUriHost = bucket,
-      toUriPath = "/",
-      toUriStartsWith = s"gs://$bucket/",
-      toUriEndsWith = s"gs://$bucket/",
       getNameCount = 0,
-      isAbsolute = true,
-      isDirectory = true),
-
+      isAbsolute = true
+    ),
     GoodPath(
       description = "a bucket with a normalized path ..",
       path = s"gs://$bucket/..",
@@ -296,14 +270,9 @@ class GcsPathBuilderSpec extends TestKitSuite with FlatSpecLike with Matchers wi
       root = s"gs://$bucket/",
       name = "",
       getFileName = s"gs://$bucket/",
-      toUriHost = bucket,
-      toUriPath = "/",
-      toUriStartsWith = s"gs://$bucket/",
-      toUriEndsWith = s"gs://$bucket/",
       getNameCount = 1,
-      isAbsolute = false,
-      isDirectory = true),
-
+      isAbsolute = false
+    ),
     GoodPath(
       description = "a bucket including . in the normalized path",
       path = s"gs://$bucket/hello/./world",
@@ -315,14 +284,9 @@ class GcsPathBuilderSpec extends TestKitSuite with FlatSpecLike with Matchers wi
       root = s"gs://$bucket/",
       name = "world",
       getFileName = s"gs://$bucket/world",
-      toUriHost = bucket,
-      toUriPath = "/hello/world",
-      toUriStartsWith = s"gs://$bucket/hello/world",
-      toUriEndsWith = s"gs://$bucket/hello/world",
       getNameCount = 2,
-      isAbsolute = true,
-      isDirectory = false),
-
+      isAbsolute = true
+    ),
     GoodPath(
       description = "a bucket including .. in the normalized path",
       path = s"gs://$bucket/hello/../world",
@@ -334,36 +298,88 @@ class GcsPathBuilderSpec extends TestKitSuite with FlatSpecLike with Matchers wi
       root = s"gs://$bucket/",
       name = "world",
       getFileName = s"gs://$bucket/world",
-      toUriHost = bucket,
-      toUriPath = "/world",
-      toUriStartsWith = s"gs://$bucket/world",
-      toUriEndsWith = s"gs://$bucket/world",
       getNameCount = 1,
-      isAbsolute = true,
-      isDirectory = false)
+      isAbsolute = true
+    ),
+    GoodPath(
+      description = "a bucket with an underscore",
+      path = s"gs://hello_underscore/world",
+      normalize = true,
+      pathAsString = s"gs://hello_underscore/world",
+      pathWithoutScheme = s"hello_underscore/world",
+      parent = s"gs://hello_underscore/",
+      getParent = s"gs://hello_underscore/",
+      root = s"gs://hello_underscore/",
+      name = "world",
+      getFileName = s"gs://hello_underscore/world",
+      getNameCount = 1,
+      isAbsolute = true
+    )
   )
 
   private def badPaths = Seq(
-    BadPath("an empty path", "", " does not have a gcs scheme"),
-    BadPath("an bucketless path", "gs://", "Expected authority at index 5: gs://"),
-    BadPath("a bucket named .", "gs://./hello/world", "gs://./hello/world does not have a host"),
-    BadPath("a non ascii bucket name", "gs://nonasciibucket£€/hello/world",
-      "gs://nonasciibucket%C2%A3%E2%82%AC/hello/world does not have a host"),
+    BadPath("an empty path", "", "Path \"\" does not have a gcs scheme"),
+    BadPath("an bucketless path",
+            "gs://",
+            "The specified GCS path 'gs://' does not parse as a URI.\nExpected authority at index 5: gs://"
+    ),
+    BadPath(
+      "a bucket named .",
+      "gs://./hello/world",
+      "The path 'gs://./hello/world' does not seem to be a valid GCS path. Please check that it starts with gs:// and that the bucket and object follow GCS naming guidelines at https://cloud.google.com/storage/docs/naming."
+    ),
+    BadPath(
+      "a non ascii bucket name",
+      "gs://nonasciibucket£€/hello/world",
+      "The path 'gs://nonasciibucket£€/hello/world' does not seem to be a valid GCS path. Please check that it starts with gs:// and that the bucket and object follow GCS naming guidelines at https://cloud.google.com/storage/docs/naming."
+    ),
     BadPath("a https path", "https://hello/world", "Cloud Storage URIs must have 'gs' scheme: https://hello/world"),
     BadPath("a file uri path", "file:///hello/world", "Cloud Storage URIs must have 'gs' scheme: file:///hello/world"),
-    BadPath("a relative file path", "hello/world", "hello/world does not have a gcs scheme"),
-    BadPath("an absolute file path", "/hello/world", "/hello/world does not have a gcs scheme")
+    BadPath("a relative file path", "hello/world", "Path \"hello/world\" does not have a gcs scheme"),
+    BadPath("an absolute file path", "/hello/world", "Path \"/hello/world\" does not have a gcs scheme")
   )
 
-  private lazy val pathBuilder = {
-    GoogleAuthModeSpec.assumeHasApplicationDefaultCredentials()
+  private lazy val pathBuilder =
+    MockGcsPathBuilder.instance
 
-    GcsPathBuilder.fromCredentials(
-      NoCredentials.getInstance(),
-      "cromwell-test",
-      None,
-      CloudStorageConfiguration.DEFAULT,
-      WorkflowOptions.empty
-    )
+  it should "not mix up credentials" in {
+    def retrySettings: RetrySettings = RetrySettings.newBuilder().build()
+    val cloudStorageConfig: CloudStorageConfiguration = GcsStorage.DefaultCloudStorageConfiguration
+
+    val noCredentials = NoCredentials.getInstance()
+    val noCredentialsPathBuilder: GcsPathBuilder = {
+      val noCredentialsStorage = GcsStorage.gcsStorage("no-credentials", noCredentials, retrySettings)
+      val noCredentialsStorageOptions =
+        GcsStorage.gcsStorageOptions(noCredentials, retrySettings, Option("proj-no-credentials"))
+
+      new GcsPathBuilder(noCredentialsStorage, cloudStorageConfig, noCredentialsStorageOptions)
+    }
+
+    val serviceAccountCredentials =
+      ServiceAccountCredentials.fromStream(new ByteArrayInputStream(serviceAccountJsonContents.getBytes))
+    val serviceAccountPathBuilder: GcsPathBuilder = {
+      val serviceAccountStorage = GcsStorage.gcsStorage("service-account", serviceAccountCredentials, retrySettings)
+      val serviceAccountStorageOptions =
+        GcsStorage.gcsStorageOptions(serviceAccountCredentials, retrySettings, Option("proj-service-account"))
+
+      new GcsPathBuilder(serviceAccountStorage, cloudStorageConfig, serviceAccountStorageOptions)
+    }
+
+    def credentialsForPath(gcsPath: GcsPath): Credentials = {
+      val cloudFilesystemProvider =
+        gcsPath.nioPath.getFileSystem.provider().asInstanceOf[CloudStorageFileSystemProvider]
+      val storageOptionsField = cloudFilesystemProvider.getClass.getDeclaredField("storageOptions")
+      storageOptionsField.setAccessible(true)
+      val storageOptions = storageOptionsField.get(cloudFilesystemProvider)
+      val credentialsField = storageOptions.getClass.getSuperclass.getSuperclass.getDeclaredField("credentials")
+      credentialsField.setAccessible(true)
+      credentialsField.get(storageOptions).asInstanceOf[Credentials]
+    }
+
+    val noCredentialsPath = noCredentialsPathBuilder.build("gs://no-credentials").get
+    val serviceAccountPath = serviceAccountPathBuilder.build("gs://service-account").get
+
+    credentialsForPath(noCredentialsPath) shouldBe noCredentials
+    credentialsForPath(serviceAccountPath) shouldBe serviceAccountCredentials
   }
 }

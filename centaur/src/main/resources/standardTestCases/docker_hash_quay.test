@@ -1,0 +1,13 @@
+name: docker_hash_quay
+testFormat: workflowsuccess
+
+files {
+  workflow: docker_hash/docker_hash_quay.wdl
+  # https://github.com/broadinstitute/cromwell/issues/3998
+  options: docker_hash/docker_hash.options
+}
+
+metadata {
+  "calls.docker_hash_quay.quay.runtimeAttributes.docker": "quay.io/broadinstitute/cromwell-tools:v2.4.1",
+  "calls.docker_hash_quay.quay.dockerImageUsed": "quay.io/broadinstitute/cromwell-tools@sha256:c85fa32e75fa83acd31f50aae6adcaf952e465e36570336d12437a1f10a56b93"
+}

@@ -1,8 +1,10 @@
 package cromwell.core.callcaching
 
-import org.scalatest.{FlatSpec, Matchers}
+import common.assertion.CromwellTimeoutSpec
+import org.scalatest.flatspec.AnyFlatSpec
+import org.scalatest.matchers.should.Matchers
 
-class HashKeySpec extends FlatSpec with Matchers {
+class HashKeySpec extends AnyFlatSpec with CromwellTimeoutSpec with Matchers {
 
   "HashKey" should "produce consistent key value" in {
     val keys = Set(
@@ -17,7 +19,7 @@ class HashKeySpec extends FlatSpec with Matchers {
       HashKey("output", "String myOutput"),
       HashKey("runtime attribute", "docker")
     )
-    
+
     keys map { _.key } should contain theSameElementsAs Set(
       "command template",
       "backend name",
@@ -31,5 +33,5 @@ class HashKeySpec extends FlatSpec with Matchers {
       "runtime attribute: docker"
     )
   }
-  
+
 }

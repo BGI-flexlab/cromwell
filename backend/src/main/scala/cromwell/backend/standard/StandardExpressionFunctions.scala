@@ -1,39 +1,50 @@
 package cromwell.backend.standard
 
-import cromwell.backend.io.GlobFunctions
-import cromwell.backend.wdl.{ReadLikeFunctions, WriteFunctions}
+import akka.actor.ActorRef
+import cromwell.backend.io.{DirectoryFunctions, GlobFunctions}
+import cromwell.backend.{ReadLikeFunctions, WriteFunctions}
 import cromwell.core.CallContext
+import cromwell.core.io._
+import cromwell.core.path.PathFactory.PathBuilders
 import cromwell.core.path.{Path, PathBuilder}
-import wdl4s.expression.PureStandardLibraryFunctionsLike
-import wdl4s.values.{WdlFile, WdlValue}
 
-import scala.util.{Success, Try}
+import scala.concurrent.ExecutionContext
 
 trait StandardExpressionFunctionsParams {
-  def pathBuilders: List[PathBuilder]
+  def pathBuilders: PathBuilders
 
   def callContext: CallContext
+
+  def ioActorProxy: ActorRef
+
+  def executionContext: ExecutionContext
 }
 
-case class DefaultStandardExpressionFunctionsParams(override val pathBuilders: List[PathBuilder],
-                                                    override val callContext: CallContext
-                                                   ) extends StandardExpressionFunctionsParams
+case class DefaultStandardExpressionFunctionsParams(override val pathBuilders: PathBuilders,
+                                                    override val callContext: CallContext,
+                                                    override val ioActorProxy: ActorRef,
+                                                    override val executionContext: ExecutionContext
+) extends StandardExpressionFunctionsParams
 
 // TODO: Once we figure out premapping and postmapping, maybe we can standardize that behavior. Currently that's the most important feature that subclasses override.
 class StandardExpressionFunctions(val standardParams: StandardExpressionFunctionsParams)
-  extends PureStandardLibraryFunctionsLike with ReadLikeFunctions with WriteFunctions with GlobFunctions {
+    extends GlobFunctions
+    with DirectoryFunctions
+    with ReadLikeFunctions
+    with WriteFunctions
+    with CallCorePathFunctions {
 
-  override lazy val pathBuilders: List[PathBuilder] = standardParams.pathBuilders
+  override lazy val ec = standardParams.executionContext
 
-  override lazy val callContext: CallContext = standardParams.callContext
+  protected lazy val ioCommandBuilder: IoCommandBuilder = DefaultIoCommandBuilder
 
-  override lazy val writeDirectory: Path = callContext.root
+  override lazy val asyncIo = new AsyncIo(standardParams.ioActorProxy, ioCommandBuilder)
 
-  override def stdout(params: Seq[Try[WdlValue]]): Try[WdlFile] = Success(WdlFile(callContext.stdout))
+  override val pathBuilders: List[PathBuilder] = standardParams.pathBuilders
 
-  override def stderr(params: Seq[Try[WdlValue]]): Try[WdlFile] = Success(WdlFile(callContext.stderr))
+  val callContext: CallContext = standardParams.callContext
 
-  override def writeTempFile(path: String, prefix: String, suffix: String, content: String): String = {
-    super[WriteFunctions].writeTempFile(path, prefix, suffix, content)
-  }
+  val writeDirectory: Path = callContext.root
+
+  val isDocker: Boolean = callContext.isDocker
 }

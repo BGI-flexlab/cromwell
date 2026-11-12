@@ -1,5 +1,7 @@
 package cromwell.api.model
 
+import spray.json.{DefaultJsonProtocol, JsString, JsValue, RootJsonFormat}
+
 // ********* !!!!!!!!!! ********
 //
 // WARNING! This is a Cromwell API class. If you aren't changing the API client, you probably
@@ -23,7 +25,7 @@ case object Running extends NonTerminalStatus
 case object Aborting extends NonTerminalStatus
 
 object WorkflowStatus {
-  def apply(status: String): WorkflowStatus = {
+  def apply(status: String): WorkflowStatus =
     status match {
       case "Submitted" => Submitted
       case "Running" => Running
@@ -33,7 +35,16 @@ object WorkflowStatus {
       case "Succeeded" => Succeeded
       case bad => throw new IllegalArgumentException(s"No such status: $bad")
     }
-  }
 
   def apply(workflowStatus: CromwellStatus): WorkflowStatus = apply(workflowStatus.status)
+}
+
+object WorkflowStatusJsonFormatter extends DefaultJsonProtocol {
+  implicit object WorkflowStatusJsonFormat extends RootJsonFormat[WorkflowStatus] {
+    def write(status: WorkflowStatus) = new JsString(status.toString)
+    def read(value: JsValue) = value match {
+      case JsString(string) => WorkflowStatus(string)
+      case other => throw new UnsupportedOperationException(s"Cannot deserialize $other into a WorkflowStatus")
+    }
+  }
 }

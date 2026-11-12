@@ -1,187 +1,223 @@
+import ContinuousIntegration._
 import Dependencies._
-import Merging.customMergeStrategy
+import Merging._
 import Publishing._
 import Testing._
 import Version._
 import sbt.Keys._
 import sbt._
+import sbtassembly.AssemblyPlugin
 import sbtassembly.AssemblyPlugin.autoImport._
-import sbtdocker.DockerPlugin.autoImport._
-import sbtrelease.ReleasePlugin
+import sbtdocker.{DockerPlugin, Instruction, Instructions}
 
 object Settings {
 
-  val commonResolvers = List(
-    Resolver.jcenterRepo,
-    "Broad Artifactory Releases" at "https://broadinstitute.jfrog.io/broadinstitute/libs-release/",
-    "Broad Artifactory Snapshots" at "https://broadinstitute.jfrog.io/broadinstitute/libs-snapshot/"
-  )
-
   /*
-    The reason why -Xmax-classfile-name is set is because this will fail
-    to build on Docker otherwise.  The reason why it's 200 is because it
-    fails if the value is too close to 256 (even 254 fails).  For more info:
+     Fancy flags from https://tpolecat.github.io/2017/04/25/scalac-flags.html.
 
-    https://github.com/sbt/sbt-assembly/issues/69
-    https://github.com/scala/pickling/issues/10
+     Per JG's work in Cromwell, the following can't be turned on without causing piles of errors in wdl4s.  Many of the
+     constructs that are flagged look suspicious and probably warrant further scrutiny, but no time for that now.
 
-    Other fancy flags from
-
-    http://blog.threatstack.com/useful-scalac-options-for-better-scala-development-part-1
-
-    and
-
-    https://tpolecat.github.io/2014/04/11/scalac-flags.html
-
+     "-Ywarn-unused:params"              // Warn if a value parameter is unused.
   */
-  val compilerSettings = List(
-    "-Xlint",
-    "-feature",
-    "-Xmax-classfile-name", "200",
-    "-target:jvm-1.8",
-    "-encoding", "UTF-8",
+  val baseSettings = List(
     "-unchecked",
     "-deprecation",
-    "-Xfuture",
-    "-Yno-adapted-args",
+    "-feature",
+    "-explaintypes",
+    // the backend runs bytecode serialization, classfile writing and method-local
+    // optimizations (-opt:l:method) in parallel on N threads
+    "-Ybackend-parallelism", "3",
+    "-Ycache-plugin-class-loader:last-modified",
+    "-Ycache-macro-class-loader:last-modified",
+    "-encoding", "UTF-8",
+    "-Ymacro-annotations"
+  )
+
+  val warningSettings = List(
+    "-Xlint:adapted-args",
+    "-Xlint:constant",
+    "-Xlint:delayedinit-select",
+    "-Xlint:doc-detached",
+    "-Xlint:inaccessible",
+    "-Xlint:infer-any",
+    "-Xlint:missing-interpolator",
+    "-Xlint:nullary-unit",
+    "-Xlint:option-implicit",
+    "-Xlint:package-object-classes",
+    "-Xlint:poly-implicit-overload",
+    "-Xlint:private-shadow",
+    "-Xlint:stars-align",
+    "-Xlint:type-parameter-shadow",
     "-Ywarn-dead-code",
     "-Ywarn-numeric-widen",
     "-Ywarn-value-discard",
-    "-Ywarn-unused",
-    "-Ywarn-unused-import",
-    "-Xfatal-warnings"
+    "-Ywarn-unused:implicits",
+    "-Ywarn-unused:privates",
+    "-Ywarn-unused:locals",
+    "-Ywarn-unused:patvars"
   )
 
-  val docSettings = List(
-    // http://stackoverflow.com/questions/31488335/scaladoc-2-11-6-fails-on-throws-tag-with-unable-to-find-any-member-to-link#31497874
-    "-no-link-warnings"
+  val consoleHostileSettings = List(
+    "-Ywarn-unused:imports", // warns about every unused import on every command.
+    "-Xfatal-warnings"       // makes those warnings fatal.
   )
 
   lazy val assemblySettings = Seq(
-    assemblyJarName in assembly := name.value + "-" + version.value + ".jar",
-    aggregate in assembly := false,
-    test in assembly := {},
-    logLevel in assembly := Level.Info,
-    assemblyMergeStrategy in assembly := customMergeStrategy
+    assembly / assemblyJarName := name.value + "-" + version.value + ".jar",
+    assembly / test := {},
+    assembly / assemblyMergeStrategy := customMergeStrategy.value,
   )
 
-  lazy val dockerSettings = Seq(
-    imageNames in docker := Seq(
-      ImageName(
-        namespace = Option("broadinstitute"),
-        repository = name.value,
-        tag = Option(cromwellVersion)),
-      ImageName(
-        namespace = Option("broadinstitute"),
-        repository = name.value,
-        tag = Option(version.value))
+  val Scala2_13Version = "2.13.18"
+  private val ScalaVersion: String = Scala2_13Version
+  private val sharedSettings: Seq[Setting[_]] =
+    cromwellVersionWithGit ++ publishingSettings ++ List(
+    organization := "org.broadinstitute",
+    scalaVersion := ScalaVersion,
+    resolvers ++= additionalResolvers,
+    Global / parallelExecution := true,
+    // Seems to cause race conditions in tests, that are not pertinent to what's being tested
+    Test / parallelExecution := false,
+    Global / concurrentRestrictions ++= List(
+      // Don't run any other tasks while running tests
+      Tags.exclusive(Tags.Test),
+      // Only run tests on one sub-project at a time
+      Tags.limit(Tags.Test, 1)
     ),
-    dockerfile in docker := {
-      // The assembly task generates a fat JAR file
-      val artifact: File = assembly.value
-      val artifactTargetPath = s"/app/${artifact.name}"
-
-      new Dockerfile {
-        from("openjdk:8")
-        expose(8000)
-        add(artifact, artifactTargetPath)
-        runRaw(s"ln -s $artifactTargetPath /app/cromwell.jar")
-
-        // If you use the 'exec' form for an entry point, shell processing is not performed and 
-        // environment variable substitution does not occur.  Thus we have to /bin/bash here
-        // and pass along any subsequent command line arguments
-        // See https://docs.docker.com/engine/reference/builder/#/entrypoint
-        entryPoint("/bin/bash", "-c", "java ${JAVA_OPTS} -jar /app/cromwell.jar ${CROMWELL_ARGS} ${*}", "--")
-      }
-    },
-    buildOptions in docker := BuildOptions(
-      cache = false,
-      removeIntermediateContainers = BuildOptions.Remove.Always
+    dependencyOverrides ++= cromwellDependencyOverrides,
+    excludeDependencies ++= cromwellExcludeDependencies,
+    scalacOptions ++= baseSettings ++ warningSettings ++ consoleHostileSettings,
+    // http://stackoverflow.com/questions/31488335/scaladoc-2-11-6-fails-on-throws-tag-with-unable-to-find-any-member-to-link#31497874
+    Compile / doc / scalacOptions ++= baseSettings ++ List("-no-link-warnings"),
+    // No console-hostile options, otherwise the console is effectively unusable.
+    // https://github.com/sbt/sbt/issues/1815
+    Compile / console / scalacOptions --= consoleHostileSettings,
+    excludeDependencies ++= List(
+      "org.typelevel" % "simulacrum-scalafix-annotations_2.13"
     )
   )
 
-  val ScalaVersion = "2.11.8"
-  val commonSettings = ReleasePlugin.projectSettings ++ testSettings ++ assemblySettings ++
-    dockerSettings ++ cromwellVersionWithGit ++ publishingSettings ++ List(
-    organization := "org.broadinstitute",
-    scalaVersion := ScalaVersion,
-    resolvers ++= commonResolvers,
-    scalacOptions ++= compilerSettings,
-    scalacOptions in (Compile, doc) ++= docSettings,
-    parallelExecution := false
+  /*
+      Docker instructions to install Google Cloud SDK image in docker image. It also installs `crcmod` which
+      is needed while downloading large files using `gsutil`.
+      References:
+        - https://stackoverflow.com/questions/28372328/how-to-install-the-google-cloud-sdk-in-a-docker-image
+        - https://cromwell.readthedocs.io/en/develop/backends/Google/#issues-with-composite-files
+        - https://cloud.google.com/storage/docs/gsutil/addlhelp/CRC32CandInstallingcrcmod
+
+      Install `getm` for performant signed URL downloading with integrity checking.
+      References:
+        - https://github.com/xbrianh/getm
+   */
+  val installLocalizerSettings: List[Setting[Seq[Instruction]]] = List(
+    dockerCustomSettings := List(
+      Instructions.Env("PATH", "$PATH:/usr/local/gcloud/google-cloud-sdk/bin"),
+      // instructions to install `crcmod`
+      Instructions.Run("apt-get -y update"),
+      Instructions.Run("apt-get -y install python3.12 python3-pip wget"),
+      Instructions.Run("update-alternatives --install /usr/bin/python python /usr/bin/python3 1"),
+      Instructions.Env("CLOUDSDK_PYTHON", "python3"),
+      // instructions to install Google Cloud SDK
+      Instructions.Run("wget https://dl.google.com/dl/cloudsdk/release/google-cloud-sdk.tar.gz -O /tmp/google-cloud-sdk.tar.gz"),
+      Instructions.Run("""mkdir -p /usr/local/gcloud \
+                         | && tar -C /usr/local/gcloud -xvf /tmp/google-cloud-sdk.tar.gz \
+                         | && /usr/local/gcloud/google-cloud-sdk/install.sh""".stripMargin),
+      // instructions to install `getm`. Pin to version 0.0.5 as the behaviors of future versions with respect to
+      // messages or exit codes may change.
+      // `--break-system-packages` added for 24.04 to let us overwrite OS packages (PEP 668)
+      // TODO: `getm` is abandonware and should be removed
+      Instructions.Run("pip3 install getm==0.0.5 --break-system-packages")
+    )
   )
 
-  val coreSettings = List(
-    name := "cromwell-core",
-    libraryDependencies ++= coreDependencies
-  ) ++ commonSettings
+  val swaggerUiSettings = List(Compile / resourceGenerators += writeSwaggerUiVersionConf)
+  val engineSettings: List[Setting[_]] = swaggerUiSettings
+  val cromiamSettings: List[Setting[_]] = swaggerUiSettings
+  val drsLocalizerSettings: List[Setting[_]] = installLocalizerSettings
 
-  val servicesSettings = List(
-    name := "cromwell-services"
-  ) ++ commonSettings
+  private def buildProject(project: Project,
+                           projectName: String,
+                           dependencies: Seq[ModuleID],
+                           builders: Seq[Project => Project]): Project = {
+    val projectSettings = List(
+      name := projectName,
+      libraryDependencies ++= dependencies
+    ) ++ sharedSettings
 
-  val gcsFileSystemSettings = List(
-    name := "cromwell-gcsfilesystem",
-    libraryDependencies ++= gcsFileSystemDependencies
-  ) ++ commonSettings
+    builders.foldRight(project.settings(projectSettings))(_ (_))
+  }
 
-  val databaseSqlSettings = List(
-    name := "cromwell-database-sql",
-    libraryDependencies ++= databaseSqlDependencies
-  ) ++ commonSettings
+  // Adds settings to build a library
+  implicit class ProjectLibrarySettings(val project: Project) extends AnyVal {
+    def withLibrarySettings(libraryName: String,
+                            dependencies: Seq[ModuleID] = List.empty,
+                            customSettings: Seq[Setting[_]] = List.empty,
+                            integrationTests: Boolean = false): Project = {
 
-  val databaseMigrationSettings = List(
-    name := "cromwell-database-migration",
-    libraryDependencies ++= databaseMigrationDependencies
-  ) ++ commonSettings
+      val builders: Seq[Project => Project] = List(
+        addTestSettings,
+        if (integrationTests) addIntegrationTestSettings else identity,
+        _
+          .disablePlugins(AssemblyPlugin)
+          .settings(Compile / resourceGenerators += writeProjectVersionConf)
+          .settings(customSettings)
+      )
 
-  val cromwellApiClientSettings = List(
-    name := "cromwell-api-client",
-    libraryDependencies ++= cromwellApiClientDependencies,
-    organization := "org.broadinstitute",
-    scalaVersion := "2.12.1",
-    resolvers ++= commonResolvers
-    // scalacOptions ++= compilerSettings,
-    // scalacOptions in (Compile, doc) ++= docSettings,
-    // parallelExecution := false
-  ) ++ ReleasePlugin.projectSettings ++ testSettings ++ assemblySettings ++
-    cromwellVersionWithGit ++ publishingSettings
+      buildProject(project, libraryName, dependencies, builders)
+    }
+  }
 
-  val dockerHashingSettings = List(
-    name := "cromwell-docker-hashing"
-  ) ++ commonSettings
+  // Adds settings to build an executable
+  implicit class ProjectExecutableSettings(val project: Project) extends AnyVal {
+    def withExecutableSettings(executableName: String,
+                               dependencies: Seq[ModuleID] = List.empty,
+                               customSettings: Seq[Setting[_]] = List.empty,
+                               buildDocker: Boolean = true,
+                               pushDocker: Boolean = true): Project = {
 
-  val backendSettings = List(
-    name := "cromwell-backend"
-  ) ++ commonSettings
+      val builders: Seq[Project => Project] = List(
+        addTestSettings,
+        if (buildDocker) {
+          _
+            .enablePlugins(DockerPlugin)
+            .settings(dockerSettings)
+            .settings(dockerPushSettings(pushDocker))
+        } else {
+          identity
+        },
+        _
+          .settings(assemblySettings)
+          .settings(Compile / resourceGenerators += writeProjectVersionConf)
+          .settings(customSettings)
+      )
 
-  val sfsBackendSettings = List(
-    name := "cromwell-sfs-backend"
-  ) ++ commonSettings
+      buildProject(project, executableName, dependencies, builders)
+    }
+  }
 
-  val tesBackendSettings = List(
-    name := "cromwell-tes-backend",
-    libraryDependencies ++= tesBackendDependencies
-  ) ++ commonSettings
+  // Adds settings to build the root project
+  implicit class ProjectRootSettings(val project: Project) extends AnyVal {
+    def withRootSettings(): Project = {
 
-  val sparkBackendSettings = List(
-    name := "cromwell-spark-backend",
-    libraryDependencies ++= sparkBackendDependencies
-  ) ++ commonSettings
+      val builders: Seq[Project => Project] = List(
+        addTestSettings,
+        _
+          .disablePlugins(AssemblyPlugin)
+          .settings(publish := {})
+          .settings(ciSettings)
+      )
 
-  val jesBackendSettings = List(
-    name := "cromwell-jes-backend",
-    libraryDependencies ++= jesBackendDependencies
-  ) ++ commonSettings
+      buildProject(project, "root", Nil, builders)
+    }
 
-  val engineSettings = List(
-    name := "cromwell-engine",
-    libraryDependencies ++= engineDependencies
-  ) ++ commonSettings ++ versionConfCompileSettings
-
-  val rootSettings = List(
-    name := "cromwell",
-    libraryDependencies ++= rootDependencies
-  ) ++ commonSettings
+    /**
+      * After aggregations have been added to the root project, we can do additional tasks like checking if every
+      * sub-project in build.sbt will also be tested by the root-aggregated `sbt test` command.
+      */
+    def withAggregateSettings(): Project = {
+      project.settings(aggregateSettings(project))
+    }
+  }
 
 }

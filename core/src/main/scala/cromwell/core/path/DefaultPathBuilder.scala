@@ -11,13 +11,14 @@ import scala.util.Try
   * PathBuilder using the default FileSystem to attempt to build a Path.
   */
 case object DefaultPathBuilder extends PathBuilder {
-  override def name = "Default"
+  override lazy val name = FileSystems.getDefault.getClass.getSimpleName
+
+  def build(path: java.nio.file.Path): DefaultPath = DefaultPath(path)
 
   override def build(pathAsString: String): Try[DefaultPath] = Try {
     val uri = URI.create(UrlEscapers.urlFragmentEscaper().escape(pathAsString))
     Option(uri.getScheme) match {
       case Some("file") | None =>
-
         if (pathAsString.startsWith("file://")) {
           // NOTE: Legacy support for old paths generated as URIs by the old .toRealString
           val host = Option(uri.getHost) getOrElse ""
@@ -42,15 +43,17 @@ case object DefaultPathBuilder extends PathBuilder {
 
   def createTempDirectory(prefix: String): DefaultPath = DefaultPath(java.nio.file.Files.createTempDirectory(prefix))
 
-  def createTempFile(prefix: String = "", suffix: String = "", parent: Option[Path] = None): Path = {
+  def createTempFile(prefix: String = "", suffix: String = "", parent: Option[Path] = None): Path =
     parent match {
       case Some(dir) => dir.createTempFile(prefix, suffix)
       case _ => DefaultPath(java.nio.file.Files.createTempFile(prefix, suffix))
     }
-  }
 }
 
-case class DefaultPath private[path](nioPath: NioPath) extends Path {
+case class DefaultPath private[path] (nioPath: NioPath) extends Path {
+
+  val filesystemTypeKey = "local"
+
   override protected def newPath(nioPath: NioPath): DefaultPath = DefaultPath(nioPath)
 
   override def pathAsString: String = nioPath.toString

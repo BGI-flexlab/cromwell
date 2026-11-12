@@ -1,11 +1,13 @@
-addSbtPlugin("se.marcuslonnberg" % "sbt-docker" % "1.4.1")
-addSbtPlugin("com.eed3si9n" % "sbt-assembly" % "0.14.3")
-addSbtPlugin("io.spray" % "sbt-revolver" % "0.8.0")
-/*
-sbt-git 0.7.1 is the last version <= 0.8.5 that works with detached git submodules and our docker build.
-See https://github.com/broadinstitute/cromwell/issues/645
- */
-addSbtPlugin("com.typesafe.sbt" % "sbt-git" % "0.7.1")
-addSbtPlugin("com.github.gseitz" % "sbt-release" % "1.0.3")
-addSbtPlugin("org.scoverage" % "sbt-scoverage" % "1.5.0")
-addSbtPlugin("org.scoverage" % "sbt-coveralls" % "1.1.0")
+addSbtPlugin("se.marcuslonnberg" % "sbt-docker" % "1.9.0")
+addSbtPlugin("com.eed3si9n" % "sbt-assembly" % "1.1.1")
+addSbtPlugin("com.github.sbt" % "sbt-git" % "2.0.0")
+addSbtPlugin("org.scoverage" % "sbt-scoverage" % "2.4.4")
+addSbtPlugin("com.github.cb372" % "sbt-explicit-dependencies" % "0.2.16")
+addSbtPlugin("org.scalameta" % "sbt-scalafmt" % "2.5.2")
+addDependencyTreePlugin
+
+// This plugin is only used for `sbt publish`, which requires GCP auth to push to GAR.
+// The plugin itself spews a bunch of errors when added to an environment without GCP auth.
+// Only enable the plugin when we actually want to publish.
+val publishToGAR = sys.env.contains("PUBLISH_TO_GAR")
+addSbtPlugin("org.latestbit" % "sbt-gcs-plugin" % "1.14.0").filter(_ => publishToGAR)

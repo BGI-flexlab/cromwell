@@ -1,37 +1,42 @@
 package cromwell.backend.validation
 
-import cats.syntax.validated._
+import cats.data.NonEmptyList
+import cats.syntax.either._
 import com.typesafe.config.Config
-import lenthall.validation.ErrorOr.ErrorOr
-import wdl4s.types.WdlIntegerType
-import wdl4s.values.{WdlInteger, WdlValue}
+import common.validation.ErrorOr.ErrorOr
+import eu.timepit.refined.api.Refined
+import eu.timepit.refined.numeric.Positive
+import eu.timepit.refined.refineV
+import wom.RuntimeAttributesKeys._
+import wom.types.WomIntegerType
+import wom.values.{WomInteger, WomValue}
 
 /**
   * Validates the "cpu" runtime attribute an Integer greater than 0, returning the value as an `Int`.
   *
   * `instance` returns an validation that errors when no attribute is specified.
   *
-  * `default` a hardcoded default WdlValue for Cpu.
+  * `default` a hardcoded default WomValue for Cpu.
   *
   * `configDefaultWdlValue` returns the value of the attribute as specified by the
-  * reference.conf file, coerced into a WdlValue.
+  * reference.conf file, coerced into a WomValue.
   */
 object CpuValidation {
-  lazy val instance: RuntimeAttributesValidation[Int] = new CpuValidation
-  lazy val optional: OptionalRuntimeAttributesValidation[Int] = instance.optional
-  lazy val default: WdlValue = WdlInteger(1)
-  def configDefaultWdlValue(config: Option[Config]): Option[WdlValue] = instance.configDefaultWdlValue(config)
+  lazy val instance: RuntimeAttributesValidation[Int Refined Positive] = new CpuValidation(CpuKey)
+  lazy val optional: OptionalRuntimeAttributesValidation[Int Refined Positive] = instance.optional
+
+  lazy val defaultMin: WomValue = WomInteger(1)
+  def configDefaultWomValue(config: Option[Config]): Option[WomValue] = instance.configDefaultWomValue(config)
 }
 
-class CpuValidation extends IntRuntimeAttributesValidation(RuntimeAttributesKeys.CpuKey) {
-  override protected def validateValue: PartialFunction[WdlValue, ErrorOr[Int]] = {
-    case wdlValue if WdlIntegerType.coerceRawValue(wdlValue).isSuccess =>
-      WdlIntegerType.coerceRawValue(wdlValue).get match {
-        case WdlInteger(value) =>
-          if (value.toInt <= 0)
-            s"Expecting $key runtime attribute value greater than 0".invalidNel
-          else
-            value.toInt.validNel
+class CpuValidation(attributeName: String) extends PositiveIntRuntimeAttributesValidation(attributeName) {
+  override protected def validateValue: PartialFunction[WomValue, ErrorOr[Int Refined Positive]] = {
+    case womValue if WomIntegerType.coerceRawValue(womValue).isSuccess =>
+      WomIntegerType.coerceRawValue(womValue).get match {
+        case WomInteger(value) =>
+          refineV[Positive](value.toInt)
+            .leftMap(_ => NonEmptyList.one(s"Expecting $key runtime attribute value greater than 0"))
+            .toValidated
       }
   }
 

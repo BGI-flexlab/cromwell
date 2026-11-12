@@ -2,23 +2,23 @@ package cromwell.backend.standard
 
 import akka.actor.SupervisorStrategy.{Decider, Stop}
 import akka.actor.{ActorRef, OneForOneStrategy, Props}
-import cromwell.backend.BackendJobExecutionActor.{AbortedResponse, BackendJobExecutionResponse}
+import cromwell.backend.BackendJobExecutionActor.{BackendJobExecutionResponse, JobAbortedResponse, JobNotFoundException}
 import cromwell.backend.BackendLifecycleActor.AbortJobCommand
-import cromwell.backend.async.AsyncBackendJobExecutionActor.{Execute, Recover}
-import cromwell.backend.{BackendConfigurationDescriptor, BackendInitializationData, BackendJobDescriptor, BackendJobExecutionActor}
+import cromwell.backend._
+import cromwell.backend.async.AsyncBackendJobExecutionActor.{Execute, Reconnect, ReconnectToAbort, Recover}
 import cromwell.core.Dispatcher
 import cromwell.services.keyvalue.KeyValueServiceActor._
 
 import scala.concurrent.{Future, Promise}
-import scala.language.existentials
+import scala.util.control.NoStackTrace
 
 trait StandardSyncExecutionActorParams extends StandardJobExecutionActorParams {
+
   /** The class for creating an async backend. */
   def asyncJobExecutionActorClass: Class[_ <: StandardAsyncExecutionActor]
 }
 
-case class DefaultStandardSyncExecutionActorParams
-(
+case class DefaultStandardSyncExecutionActorParams(
   override val jobIdKey: String,
   override val serviceRegistryActor: ActorRef,
   override val ioActor: ActorRef,
@@ -26,7 +26,9 @@ case class DefaultStandardSyncExecutionActorParams
   override val configurationDescriptor: BackendConfigurationDescriptor,
   override val backendInitializationDataOption: Option[BackendInitializationData],
   override val backendSingletonActorOption: Option[ActorRef],
-  override val asyncJobExecutionActorClass: Class[_ <: StandardAsyncExecutionActor]
+  override val asyncJobExecutionActorClass: Class[_ <: StandardAsyncExecutionActor],
+  override val groupMetricsActor: ActorRef,
+  override val minimumRuntimeSettings: MinimumRuntimeSettings
 ) extends StandardSyncExecutionActorParams
 
 /**
@@ -51,7 +53,7 @@ case class DefaultStandardSyncExecutionActorParams
   * - Asynchronous actor completes the promise with a success or failure.
   */
 class StandardSyncExecutionActor(val standardParams: StandardSyncExecutionActorParams)
-  extends BackendJobExecutionActor {
+    extends BackendJobExecutionActor {
 
   override val jobDescriptor: BackendJobDescriptor = standardParams.jobDescriptor
   override val configurationDescriptor: BackendConfigurationDescriptor = standardParams.configurationDescriptor
@@ -60,28 +62,50 @@ class StandardSyncExecutionActor(val standardParams: StandardSyncExecutionActorP
 
   context.become(startup orElse receive)
 
-  private def startup: Receive = {
-    case AbortJobCommand =>
-      context.parent ! AbortedResponse(jobDescriptor.key)
-      context.stop(self)
+  private def startup: Receive = { case AbortJobCommand =>
+    context.parent ! JobAbortedResponse(jobDescriptor.key)
+    context.stop(self)
   }
 
   private def running(executor: ActorRef): Receive = {
     case AbortJobCommand =>
       executor ! AbortJobCommand
-    case abortResponse: AbortedResponse =>
+    case abortResponse: JobAbortedResponse =>
       context.parent ! abortResponse
       context.stop(self)
-    case KvPair(key, Some(jobId)) if key.key == jobIdKey =>
-      // Successful operation ID lookup during recover.
-      executor ! Recover(StandardAsyncJob(jobId))
-    case KvKeyLookupFailed(_) =>
-      // Missed operation ID lookup during recover, fall back to execute.
-      executor ! Execute
     case KvFailure(_, e) =>
-      // Failed operation ID lookup during recover, crash and let the supervisor deal with it.
+      // Failed operation ID lookup, crash and let the supervisor deal with it.
       completionPromise.tryFailure(e)
       throw new RuntimeException(s"Failure attempting to look up job id for key ${jobDescriptor.key}", e)
+  }
+
+  private def recovering(executor: ActorRef): Receive = running(executor).orElse {
+    case KvPair(key, jobId) if key.key == jobIdKey =>
+      // Successful operation ID lookup.
+      executor ! Recover(StandardAsyncJob(jobId))
+    case KvKeyLookupFailed(_) =>
+      // Missed operation ID lookup, fall back to execute.
+      executor ! Execute
+  }
+
+  private def reconnectingToAbort(executor: ActorRef): Receive = running(executor).orElse {
+    case KvPair(key, jobId) if key.key == jobIdKey =>
+      // Successful operation ID lookup.
+      executor ! ReconnectToAbort(StandardAsyncJob(jobId))
+    case KvKeyLookupFailed(_) =>
+      // Can't find an operation ID for this job, respond with a JobNotFound and don't start the job
+      completionPromise.tryFailure(JobNotFoundException(jobDescriptor.key))
+      ()
+  }
+
+  private def reconnecting(executor: ActorRef): Receive = running(executor).orElse {
+    case KvPair(key, jobId) if key.key == jobIdKey =>
+      // Successful operation ID lookup.
+      executor ! Reconnect(StandardAsyncJob(jobId))
+    case KvKeyLookupFailed(_) =>
+      // Can't find an operation ID for this job, respond with a JobNotFound and don't start the job
+      completionPromise.tryFailure(JobNotFoundException(jobDescriptor.key))
+      ()
   }
 
   /**
@@ -98,9 +122,9 @@ class StandardSyncExecutionActor(val standardParams: StandardSyncExecutionActorP
     completionPromise.future
   }
 
-  override def recover: Future[BackendJobExecutionResponse] = {
+  private def onRestart(nextReceive: ActorRef => Receive) = {
     val executorRef = createAsyncRef()
-    context.become(running(executorRef) orElse receive)
+    context.become(nextReceive(executorRef) orElse receive)
     val kvJobKey =
       KvJobKey(jobDescriptor.key.call.fullyQualifiedName, jobDescriptor.key.index, jobDescriptor.key.attempt)
     val kvGet = KvGet(ScopedKey(jobDescriptor.workflowDescriptor.id, kvJobKey, jobIdKey))
@@ -108,7 +132,16 @@ class StandardSyncExecutionActor(val standardParams: StandardSyncExecutionActorP
     completionPromise.future
   }
 
-  def createAsyncParams(): StandardAsyncExecutionActorParams = {
+  override def recover: Future[BackendJobExecutionResponse] =
+    onRestart(recovering)
+
+  override def reconnectToAborting: Future[BackendJobExecutionResponse] =
+    onRestart(reconnectingToAbort)
+
+  override def reconnect: Future[BackendJobExecutionResponse] =
+    onRestart(reconnecting)
+
+  def createAsyncParams(): StandardAsyncExecutionActorParams =
     DefaultStandardAsyncExecutionActorParams(
       standardParams.jobIdKey,
       standardParams.serviceRegistryActor,
@@ -117,18 +150,18 @@ class StandardSyncExecutionActor(val standardParams: StandardSyncExecutionActorP
       standardParams.configurationDescriptor,
       standardParams.backendInitializationDataOption,
       standardParams.backendSingletonActorOption,
-      completionPromise
+      completionPromise,
+      standardParams.groupMetricsActor,
+      standardParams.minimumRuntimeSettings
     )
-  }
 
   def createAsyncProps(): Props = {
     val asyncParams = createAsyncParams()
     Props(standardParams.asyncJobExecutionActorClass, asyncParams)
   }
 
-  def createAsyncRefName(): String = {
+  def createAsyncRefName(): String =
     standardParams.asyncJobExecutionActorClass.getSimpleName
-  }
 
   def createAsyncRef(): ActorRef = {
     val props = createAsyncProps().withDispatcher(Dispatcher.BackendDispatcher)
@@ -136,16 +169,18 @@ class StandardSyncExecutionActor(val standardParams: StandardSyncExecutionActorP
     context.actorOf(props, name)
   }
 
-  override def abort(): Unit = {
-    throw new NotImplementedError("Abort is implemented via a custom receive of the message AbortJobCommand.")
-  }
+  override def abort(): Unit =
+    throw new UnsupportedOperationException("Abort is implemented via a custom receive of the message AbortJobCommand.")
 
   // Supervision strategy: if the async actor throws an exception, stop the actor and fail the job.
-  def jobFailingDecider: Decider = {
-    case exception: Exception =>
-      completionPromise.tryFailure(
-        new RuntimeException(s"${createAsyncRefName()} failed and didn't catch its exception.", exception))
-      Stop
+  def jobFailingDecider: Decider = { case exception: Exception =>
+    completionPromise.tryFailure(
+      new RuntimeException(
+        s"${createAsyncRefName()} failed and didn't catch its exception. This condition has been handled and the job will be marked as failed.",
+        exception
+      ) with NoStackTrace
+    )
+    Stop
   }
 
   override val supervisorStrategy: OneForOneStrategy = OneForOneStrategy()(jobFailingDecider)

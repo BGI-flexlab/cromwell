@@ -1,118 +1,434 @@
+import Dependencies._
 import Settings._
-import Testing._
 
-lazy val core = (project in file("core"))
-  .settings(coreSettings:_*)
-  .withTestSettings
+// Libraries
+
+lazy val common = project
+  .withLibrarySettings("cromwell-common", commonDependencies)
+
+lazy val wom = project
+  .withLibrarySettings("cromwell-wom", womDependencies)
+  .dependsOn(common)
+  .dependsOn(common % "test->test")
+
+lazy val wdlRoot = Path("wdl")
+
+lazy val wdlModelRoot = wdlRoot / "model"
+
+lazy val wdlSharedModel = (project in wdlModelRoot / "shared")
+  .withLibrarySettings("cromwell-wdl-model-core", wdlDependencies)
+  .dependsOn(wom)
+  .dependsOn(common % "test->test")
+
+lazy val wdlModelDraft2 = (project in wdlModelRoot / "draft2")
+  .withLibrarySettings("cromwell-wdl-model-draft2", wdlDependencies)
+  .dependsOn(wdlSharedTransforms)
+  .dependsOn(wdlSharedModel)
+  .dependsOn(wom % "test->test")
+  .dependsOn(common % "test->test")
+
+lazy val wdlModelDraft3 = (project in wdlModelRoot / "draft3")
+  .withLibrarySettings("cromwell-wdl-model-draft3")
+  .dependsOn(wdlSharedModel)
+  .dependsOn(common % "test->test")
+
+lazy val wdlModelBiscayne = (project in wdlModelRoot / "biscayne")
+  .withLibrarySettings("cromwell-wdl-model-biscayne")
+  .dependsOn(wdlModelDraft3)
+  .dependsOn(common % "test->test")
+
+lazy val wdlModelCascades = (project in wdlModelRoot / "cascades")
+  .withLibrarySettings("cromwell-wdl-model-cascades")
+  .dependsOn(wdlSharedModel)
+  .dependsOn(common % "test->test")
+
+lazy val wdlTransformsRoot = wdlRoot / "transforms"
+
+lazy val wdlSharedTransforms = (project in wdlTransformsRoot / "shared")
+  .withLibrarySettings("cromwell-wdl-transforms-shared", wdlDependencies)
+  .dependsOn(wdlSharedModel)
+  .dependsOn(wom)
+  .dependsOn(common % "test->test")
+
+lazy val wdlTransformsDraft2 = (project in wdlTransformsRoot / "draft2")
+  .withLibrarySettings("cromwell-wdl-transforms-draft2", wdlDependencies)
+  .dependsOn(wdlSharedTransforms)
+  .dependsOn(wdlModelDraft2)
+  .dependsOn(core % "test->test")
+  .dependsOn(common % "test->test")
+
+lazy val wdlNewBaseTransforms = (project in wdlTransformsRoot / "new-base")
+  .withLibrarySettings("cromwell-wdl-transforms-new-base", wdlDependencies)
+  .dependsOn(wdlSharedTransforms)
+  .dependsOn(wdlModelDraft3)
+  .dependsOn(languageFactoryCore)
+  .dependsOn(wom)
+  .dependsOn(common % "test->test")
+
+lazy val wdlTransformsDraft3 = (project in wdlTransformsRoot / "draft3")
+  .withLibrarySettings("cromwell-wdl-transforms-draft3", wdlDependencies)
+  .dependsOn(wdlNewBaseTransforms)
+  .dependsOn(languageFactoryCore)
+  .dependsOn(common % "test->test")
+  .dependsOn(wom % "test->test")
+
+lazy val wdlTransformsBiscayne = (project in wdlTransformsRoot / "biscayne")
+  .withLibrarySettings("cromwell-wdl-transforms-biscayne", wdlDependencies)
+  .dependsOn(wdlNewBaseTransforms)
+  .dependsOn(languageFactoryCore)
+  .dependsOn(common % "test->test")
+  .dependsOn(wom % "test->test")
+
+lazy val wdlTransformsCascades = (project in wdlTransformsRoot / "cascades")
+  .withLibrarySettings("cromwell-wdl-transforms-cascades", wdlDependencies)
+  .dependsOn(wdlNewBaseTransforms)
+  .dependsOn(languageFactoryCore)
+  .dependsOn(common % "test->test")
+  .dependsOn(wom % "test->test")
+
+lazy val core = project
+  .withLibrarySettings("cromwell-core", coreDependencies)
+  .dependsOn(wom)
+  .dependsOn(wom % "test->test")
+  .dependsOn(common % "test->test")
+
+lazy val cloudSupport = project
+  .withLibrarySettings("cromwell-cloud-support", cloudSupportDependencies)
+  .dependsOn(common)
+  .dependsOn(common % "test->test")
+
+lazy val awsS3FileSystem = (project in file("filesystems/s3"))
+  .withLibrarySettings("cromwell-aws-s3filesystem", s3FileSystemDependencies)
+  .dependsOn(core)
+  .dependsOn(cloudSupport)
+  .dependsOn(core % "test->test")
+  .dependsOn(cloudSupport % "test->test")
+  .dependsOn(common % "test->test")
+
+lazy val httpFileSystem = (project in file("filesystems/http"))
+  .withLibrarySettings("cromwell-httpFileSystem", httpFileSystemDependencies)
+  .dependsOn(core)
+  .dependsOn(core % "test->test")
+  .dependsOn(common % "test->test")
 
 lazy val gcsFileSystem = (project in file("filesystems/gcs"))
-  .settings(gcsFileSystemSettings:_*)
-  .withTestSettings
+  .withLibrarySettings("cromwell-gcsfilesystem", gcsFileSystemDependencies)
+  .dependsOn(core)
+  .dependsOn(cloudSupport)
+  .dependsOn(core % "test->test")
+  .dependsOn(cloudSupport % "test->test")
+  .dependsOn(common % "test->test")
+
+lazy val sraFileSystem = (project in file("filesystems/sra"))
+  .withLibrarySettings("cromwell-srafilesystem")
   .dependsOn(core)
   .dependsOn(core % "test->test")
+  .dependsOn(common % "test->test")
+
+lazy val ftpFileSystem = (project in file("filesystems/ftp"))
+  .withLibrarySettings("cromwell-ftpFileSystem")
+  .dependsOn(core)
+  .dependsOn(core % "test->test")
+  .dependsOn(`cloud-nio-impl-ftp`)
+  .dependsOn(common % "test->test")
+
+lazy val drsFileSystem = (project in file("filesystems/drs"))
+  .withLibrarySettings("cromwell-drsFileSystem")
+  .dependsOn(core)
+  .dependsOn(core % "test->test")
+  .dependsOn(`cloud-nio-impl-drs`)
+  .dependsOn(`cloud-nio-impl-drs` % "test->test")
+  .dependsOn(cloudSupport)
+  .dependsOn(common % "test->test")
 
 lazy val databaseSql = (project in file("database/sql"))
-  .settings(databaseSqlSettings:_*)
-  .withTestSettings
+  .withLibrarySettings("cromwell-database-sql", databaseSqlDependencies)
+  .dependsOn(common % "test->test")
 
 lazy val databaseMigration = (project in file("database/migration"))
-  .settings(databaseMigrationSettings: _*)
+  .withLibrarySettings("cromwell-database-migration", databaseMigrationDependencies)
   .dependsOn(core)
-  .withTestSettings
+  .dependsOn(wdlModelDraft2)
+  .dependsOn(wdlTransformsDraft2)
+  .dependsOn(common % "test->test")
 
-lazy val dockerHashing = (project in file("dockerHashing"))
-  .settings(dockerHashingSettings: _*)
+lazy val dockerHashing = project
+  .withLibrarySettings("cromwell-docker-hashing", dockerHashingDependencies)
+  .dependsOn(cloudSupport)
   .dependsOn(core)
   .dependsOn(core % "test->test")
-  .withTestSettings
+  .dependsOn(common % "test->test")
 
-lazy val cromwellApiClient = (project in file("cromwellApiClient"))
-  .settings(cromwellApiClientSettings: _*)
-  .withTestSettings
+lazy val cromwellApiClient = project
+  .withLibrarySettings("cromwell-api-client", cromwellApiClientDependencies)
+  .dependsOn(common % "test->test")
 
-lazy val services = (project in file("services"))
-  .settings(servicesSettings:_*)
-  .withTestSettings
-  .dependsOn(core)
+lazy val centaur = project
+  .withLibrarySettings("centaur", centaurDependencies, integrationTests = true)
+  .dependsOn(cloudSupport)
+  .dependsOn(cromwellApiClient)
+  .dependsOn(databaseSql)
+  .dependsOn(wdlModelDraft2)
+  .dependsOn(wdlTransformsDraft2)
+  .dependsOn(wdlTransformsDraft3)
+  .dependsOn(womtool)
+  .dependsOn(common % "test->test")
+
+lazy val services = project
+  .withLibrarySettings("cromwell-services", servicesDependencies)
   .dependsOn(databaseSql)
   .dependsOn(databaseMigration)
+  .dependsOn(cloudSupport)
+  .dependsOn(dockerHashing)
+  .dependsOn(languageFactoryCore)
+  .dependsOn(wdlDraft2LanguageFactory % "test->test") // because the WaaS tests init language config with all languages
+  .dependsOn(wdlDraft3LanguageFactory % "test->test")
+  .dependsOn(wdlBiscayneLanguageFactory % "test->test")
+  .dependsOn(wdlCascadesLanguageFactory % "test->test")
   .dependsOn(core % "test->test")
+  .dependsOn(ftpFileSystem % "test->test")
+  .dependsOn(common % "test->test")
 
 lazy val backendRoot = Path("supportedBackends")
 
-lazy val backend = (project in file("backend"))
-  .settings(backendSettings:_*)
-  .withTestSettings
-  .dependsOn(core)
+lazy val backend = project
+  .withLibrarySettings("cromwell-backend", backendDependencies)
   .dependsOn(services)
   .dependsOn(core % "test->test")
+  .dependsOn(common % "test->test")
 
-lazy val sfsBackend = (project in backendRoot / "sfs")
-  .settings(sfsBackendSettings:_*)
-  .withTestSettings
+lazy val googlePipelinesCommon = (project in backendRoot / "google" / "pipelines" / "common")
+  .withLibrarySettings("cromwell-pipelines-common")
   .dependsOn(backend)
   .dependsOn(gcsFileSystem)
-  .dependsOn(backend % "test->test")
-  .dependsOn(services % "test->test")
-
-lazy val tesBackend = (project in backendRoot / "tes")
-  .settings(tesBackendSettings:_*)
-  .withTestSettings
-  .dependsOn(sfsBackend)
-  .dependsOn(backend % "test->test")
-
-lazy val sparkBackend = (project in backendRoot / "spark")
-  .settings(sparkBackendSettings:_*)
-  .withTestSettings
-  .dependsOn(sfsBackend)
-  .dependsOn(backend % "test->test")
-
-lazy val jesBackend = (project in backendRoot / "jes")
-  .settings(jesBackendSettings:_*)
-  .withTestSettings
-  .dependsOn(backend)
-  .dependsOn(gcsFileSystem)
+  .dependsOn(drsFileSystem)
+  .dependsOn(sraFileSystem)
+  .dependsOn(httpFileSystem)
   .dependsOn(backend % "test->test")
   .dependsOn(gcsFileSystem % "test->test")
   .dependsOn(services % "test->test")
+  .dependsOn(common % "test->test")
 
-lazy val engine = (project in file("engine"))
-  .settings(engineSettings: _*)
-  .withTestSettings
+lazy val googleBatch = (project in backendRoot / "google" / "batch")
+  .withLibrarySettings("cromwell-google-batch-backend")
   .dependsOn(core)
-  .dependsOn(dockerHashing)
-  .dependsOn(services)
   .dependsOn(backend)
   .dependsOn(gcsFileSystem)
+  .dependsOn(drsFileSystem)
+  .dependsOn(sraFileSystem)
+  .dependsOn(httpFileSystem)
+  .dependsOn(backend % "test->test")
+  .dependsOn(gcsFileSystem % "test->test")
+  .dependsOn(services % "test->test")
+  .dependsOn(common % "test->test")
+  .dependsOn(core % "test->test")
+
+lazy val awsBackend = (project in backendRoot / "aws")
+  .withLibrarySettings("cromwell-aws-backend")
+  .dependsOn(backend)
+  .dependsOn(awsS3FileSystem)
+  .dependsOn(backend % "test->test")
+  .dependsOn(awsS3FileSystem % "test->test")
+  .dependsOn(services % "test->test")
+  .dependsOn(common % "test->test")
+
+lazy val sfsBackend = (project in backendRoot / "sfs")
+  .withLibrarySettings("cromwell-sfs-backend", sfsBackendDependencies)
+  .dependsOn(backend)
+  .dependsOn(gcsFileSystem)
+  .dependsOn(httpFileSystem)
+  .dependsOn(backend % "test->test")
+  .dependsOn(services % "test->test")
+  .dependsOn(common % "test->test")
+
+lazy val tesBackend = (project in backendRoot / "tes")
+  .withLibrarySettings("cromwell-tes-backend", tesBackendDependencies)
+  .dependsOn(sfsBackend)
+  .dependsOn(ftpFileSystem)
+  .dependsOn(drsFileSystem)
+  // TES backend provides a compatibility layer to run WDLs with PAPI runtime attributes [WX-769]
+  .dependsOn(googleBatch)
+  .dependsOn(backend % "test->test")
+  .dependsOn(common % "test->test")
+
+lazy val engine = project
+  .withLibrarySettings("cromwell-engine", engineDependencies, engineSettings)
+  .dependsOn(backend)
+  .dependsOn(gcsFileSystem)
+  .dependsOn(drsFileSystem)
+  .dependsOn(httpFileSystem)
+  .dependsOn(sraFileSystem)
+  .dependsOn(awsS3FileSystem)
+  .dependsOn(awsS3FileSystem % "test->test")
+  .dependsOn(drsFileSystem % "test->test")
+  .dependsOn(httpFileSystem % "test->test")
+  .dependsOn(ftpFileSystem % "test->test")
+  .dependsOn(`cloud-nio-spi`)
+  .dependsOn(languageFactoryCore)
+  .dependsOn(wdlDraft2LanguageFactory % "test->test")
+  .dependsOn(wdlDraft3LanguageFactory % "test->test")
+  .dependsOn(wdlBiscayneLanguageFactory % "test->test")
+  .dependsOn(wdlCascadesLanguageFactory % "test->test")
+  .dependsOn(common % "test->test")
   .dependsOn(core % "test->test")
   .dependsOn(backend % "test->test")
+  .dependsOn(services % "test->test")
   // In the future we may have a dedicated test backend like the `TestLocalAsyncJobExecutionActor`.
   // For now, all the engine tests run on the "Local" backend, an implementation of an impl.sfs.config backend.
   .dependsOn(sfsBackend % "test->compile")
   .dependsOn(gcsFileSystem % "test->test")
 
-lazy val root = (project in file("."))
-  .settings(rootSettings: _*)
-  .enablePlugins(DockerPlugin)
-  .withTestSettings
-  // Full list of all sub-projects to build with the root (ex: include in `sbt test`)
-  .aggregate(core)
-  .aggregate(dockerHashing)
-  .aggregate(gcsFileSystem)
-  .aggregate(databaseSql)
-  .aggregate(databaseMigration)
-  .aggregate(services)
-  .aggregate(backend)
-  .aggregate(sfsBackend)
-  .aggregate(sparkBackend)
-  .aggregate(jesBackend)
-  .aggregate(tesBackend)
-  .aggregate(engine)
-  .aggregate(cromwellApiClient)
-  // Next level of projects to include in the fat jar (their dependsOn will be transitively included)
+// Executables
+
+lazy val womtool = project
+  .withExecutableSettings("womtool", womtoolDependencies)
+  .dependsOn(wdlDraft2LanguageFactory)
+  .dependsOn(wdlDraft3LanguageFactory)
+  .dependsOn(wdlBiscayneLanguageFactory)
+  .dependsOn(wdlCascadesLanguageFactory)
+  .dependsOn(wom % "test->test")
+  .dependsOn(common % "test->test")
+
+lazy val cromiam = (project in file("CromIAM")) // TODO: git mv CromIAM to a canonical lowercased name
+  .withExecutableSettings("cromiam", cromiamDependencies, cromiamSettings)
+  .dependsOn(common)
+  .dependsOn(cromwellApiClient)
+  .dependsOn(services)
+  .dependsOn(common % "test->test")
+
+lazy val wes2cromwell = project
+  .withExecutableSettings("wes2cromwell", wes2cromwellDependencies, buildDocker = false)
+  .dependsOn(common)
+  .dependsOn(cromiam)
+  .dependsOn(common % "test->test")
+
+lazy val languageFactoryRoot = Path("languageFactories")
+lazy val cloudNio = Path("cloud-nio")
+
+lazy val languageFactoryCore = (project in languageFactoryRoot / "language-factory-core")
+  .withLibrarySettings("language-factory-core", languageFactoryDependencies)
+  .dependsOn(core)
+  .dependsOn(common % "test->test")
+
+lazy val wdlDraft2LanguageFactory = (project in languageFactoryRoot / "wdl-draft2")
+  .withLibrarySettings("wdl-draft2", mockServerDependencies)
+  .dependsOn(languageFactoryCore)
+  .dependsOn(common % "test->test")
+  .dependsOn(wdlModelDraft2)
+  .dependsOn(wdlTransformsDraft2)
+
+lazy val wdlDraft3LanguageFactory = (project in languageFactoryRoot / "wdl-draft3")
+  .withLibrarySettings("wdl-draft3")
+  .dependsOn(languageFactoryCore)
+  .dependsOn(wdlModelDraft3)
+  .dependsOn(wdlTransformsDraft3)
+  .dependsOn(common % "test->test")
+
+lazy val wdlBiscayneLanguageFactory = (project in languageFactoryRoot / "wdl-biscayne")
+  .withLibrarySettings("wdl-biscayne")
+  .dependsOn(languageFactoryCore)
+  .dependsOn(wdlModelBiscayne)
+  .dependsOn(wdlTransformsBiscayne)
+  .dependsOn(common % "test->test")
+
+lazy val wdlCascadesLanguageFactory = (project in languageFactoryRoot / "wdl-cascades")
+  .withLibrarySettings("wdl-cascades")
+  .dependsOn(languageFactoryCore)
+  .dependsOn(wdlModelCascades)
+  .dependsOn(wdlTransformsCascades)
+  .dependsOn(common % "test->test")
+
+lazy val `cloud-nio-spi` = (project in cloudNio / "cloud-nio-spi")
+  .withLibrarySettings(libraryName = "cloud-nio-spi", dependencies = spiDependencies)
+  .dependsOn(common % "test->test")
+
+lazy val `cloud-nio-util` = (project in cloudNio / "cloud-nio-util")
+  .dependsOn(`cloud-nio-spi`)
+  .withLibrarySettings(libraryName = "cloud-nio-util", dependencies = spiUtilDependencies)
+  .dependsOn(common % "test->test")
+
+lazy val `cloud-nio-impl-ftp` = (project in cloudNio / "cloud-nio-impl-ftp")
+  .withLibrarySettings(libraryName = "cloud-nio-impl-ftp", dependencies = implFtpDependencies)
+  .dependsOn(`cloud-nio-util`)
+  .dependsOn(common % "test->test")
+
+lazy val `cloud-nio-impl-drs` = (project in cloudNio / "cloud-nio-impl-drs")
+  .withLibrarySettings(libraryName = "cloud-nio-impl-drs", dependencies = implDrsDependencies)
+  .dependsOn(`cloud-nio-util`)
+  .dependsOn(cloudSupport)
+  .dependsOn(common)
+  .dependsOn(common % "test->test")
+
+lazy val `cromwell-drs-localizer` = project
+  .withExecutableSettings("cromwell-drs-localizer", drsLocalizerDependencies, drsLocalizerSettings)
+  .dependsOn(`cloud-nio-impl-drs`)
+  .dependsOn(common)
+  .dependsOn(`cloud-nio-impl-drs` % "test->test")
+
+lazy val server = project
+  .withExecutableSettings("cromwell", serverDependencies)
   .dependsOn(engine)
-  .dependsOn(jesBackend)
+  .dependsOn(googlePipelinesCommon)
+  .dependsOn(googleBatch)
+  .dependsOn(awsBackend)
   .dependsOn(tesBackend)
-  .dependsOn(sparkBackend)
-  // Dependencies for tests
+  .dependsOn(cromwellApiClient)
+  .dependsOn(wdlDraft2LanguageFactory)
+  .dependsOn(wdlDraft3LanguageFactory)
+  .dependsOn(wdlBiscayneLanguageFactory)
+  .dependsOn(wdlCascadesLanguageFactory)
   .dependsOn(engine % "test->test")
+  .dependsOn(common % "test->test")
+
+lazy val root = (project in file("."))
+  .withRootSettings()
+  // Full list of all sub-projects to build with the root (ex: include in `sbt test`)
+  .aggregate(`cloud-nio-impl-drs`)
+  .aggregate(`cloud-nio-impl-ftp`)
+  .aggregate(`cloud-nio-spi`)
+  .aggregate(`cloud-nio-util`)
+  .aggregate(`cromwell-drs-localizer`)
+  .aggregate(awsBackend)
+  .aggregate(awsS3FileSystem)
+  .aggregate(backend)
+  .aggregate(centaur)
+  .aggregate(cloudSupport)
+  .aggregate(common)
+  .aggregate(core)
+  .aggregate(cromiam)
+  .aggregate(cromwellApiClient)
+  .aggregate(databaseMigration)
+  .aggregate(databaseSql)
+  .aggregate(dockerHashing)
+  .aggregate(drsFileSystem)
+  .aggregate(engine)
+  .aggregate(ftpFileSystem)
+  .aggregate(gcsFileSystem)
+  .aggregate(googlePipelinesCommon)
+  .aggregate(googleBatch)
+  .aggregate(httpFileSystem)
+  .aggregate(languageFactoryCore)
+  .aggregate(server)
+  .aggregate(services)
+  .aggregate(sfsBackend)
+  .aggregate(sraFileSystem)
+  .aggregate(tesBackend)
+  .aggregate(wdlBiscayneLanguageFactory)
+  .aggregate(wdlCascadesLanguageFactory)
+  .aggregate(wdlDraft2LanguageFactory)
+  .aggregate(wdlDraft3LanguageFactory)
+  .aggregate(wdlModelBiscayne)
+  .aggregate(wdlModelCascades)
+  .aggregate(wdlModelDraft2)
+  .aggregate(wdlModelDraft3)
+  .aggregate(wdlNewBaseTransforms)
+  .aggregate(wdlSharedModel)
+  .aggregate(wdlSharedTransforms)
+  .aggregate(wdlTransformsBiscayne)
+  .aggregate(wdlTransformsCascades)
+  .aggregate(wdlTransformsDraft2)
+  .aggregate(wdlTransformsDraft3)
+  .aggregate(wes2cromwell)
+  .aggregate(wom)
+  .aggregate(womtool)
+  .withAggregateSettings()

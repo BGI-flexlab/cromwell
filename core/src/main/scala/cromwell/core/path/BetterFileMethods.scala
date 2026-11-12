@@ -3,13 +3,17 @@ package cromwell.core.path
 import java.io._
 import java.net.URI
 import java.nio.channels.{AsynchronousFileChannel, FileChannel}
+import java.nio.charset.Charset
 import java.nio.file.attribute._
 import java.nio.file.{FileSystem, PathMatcher}
+import java.security.MessageDigest
 import java.time.Instant
 import java.util.zip.Deflater
 
-import scala.collection.JavaConverters._
-import scala.io.{BufferedSource, Codec}
+import better.files.{Dispose, DisposeableExtensions, StringSplitter}
+
+import scala.jdk.CollectionConverters._
+import scala.io.{BufferedSource, Codec, Source}
 
 /**
   * Implements methods with the same names and signatures as better.files.File.
@@ -23,13 +27,13 @@ trait BetterFileMethods {
 
   import BetterFileMethods._
 
-  private final def newPath(file: better.files.File): Path = newPath(file.path)
+  final private def newPath(file: better.files.File): Path = newPath(file.path)
 
-  private final def newPathOrNull(file: better.files.File): Path = Option(file).map(newPath).orNull
+  final private def newPathOrNull(file: better.files.File): Path = Option(file).map(newPath).orNull
 
   final def toJava: JFile = betterFile.toJava
 
-  final def name: String = betterFile.name
+  def name: String = betterFile.name
 
   final def nameOption: Option[String] = betterFile.nameOption
 
@@ -40,8 +44,10 @@ trait BetterFileMethods {
 
   final def extension: Option[String] = betterFile.extension
 
-  final def extension(includeDot: Boolean = true, includeAll: Boolean = false,
-                      toLowerCase: Boolean = true): Option[String] =
+  final def extension(includeDot: Boolean = true,
+                      includeAll: Boolean = false,
+                      toLowerCase: Boolean = true
+  ): Option[String] =
     betterFile.extension(includeDot, includeAll, toLowerCase)
 
   final def hasExtension: Boolean = betterFile.hasExtension
@@ -56,16 +62,17 @@ trait BetterFileMethods {
 
   final def /(child: String): Path = newPath(betterFile./(child))
 
-  final def createChild(child: String, asDirectory: Boolean = false)
-                       (implicit attributes: Attributes = Attributes.default,
-                        linkOptions: LinkOptions = LinkOptions.default): Path =
+  final def createChild(child: String, asDirectory: Boolean = false)(implicit
+    attributes: Attributes = Attributes.default,
+    linkOptions: LinkOptions = LinkOptions.default
+  ): Path =
     newPath(betterFile.createChild(child, asDirectory)(attributes, linkOptions))
 
-  final def createIfNotExists(asDirectory: Boolean = false, createParents: Boolean = false)
-                             (implicit attributes: Attributes = Attributes.default,
-                              linkOptions: LinkOptions = LinkOptions.default): Path = {
+  final def createIfNotExists(asDirectory: Boolean = false, createParents: Boolean = false)(implicit
+    attributes: Attributes = Attributes.default,
+    linkOptions: LinkOptions = LinkOptions.default
+  ): Path =
     newPath(betterFile.createIfNotExists(asDirectory, createParents)(attributes, linkOptions))
-  }
 
   final def exists(implicit linkOptions: LinkOptions = LinkOptions.default): Boolean = betterFile.exists(linkOptions)
 
@@ -95,68 +102,69 @@ trait BetterFileMethods {
     this
   }
 
-  final def createDirectories()(implicit attributes: Attributes = Attributes.default): this.type = {
+  def createDirectories()(implicit attributes: Attributes = Attributes.default): this.type = {
     betterFile.createDirectories()(attributes)
     this
   }
 
-  final def chars(implicit codec: Codec): Iterator[Char] = betterFile.chars(codec)
+  final def chars(implicit charset: Charset = DefaultCharset): Iterator[Char] = betterFile.chars(charset)
 
-  final def lines(implicit codec: Codec): Traversable[String] = betterFile.lines(codec)
+  final def lines(implicit charset: Charset = DefaultCharset): Iterable[String] = betterFile.lines(charset)
 
-  final def lineIterator(implicit codec: Codec): Iterator[String] = betterFile.lineIterator(codec)
+  final def lineIterator(implicit charset: Charset = DefaultCharset): Iterator[String] =
+    betterFile.lineIterator(charset)
 
-  final def tokens(implicit config: Scanner.Config = Scanner.Config.default, codec: Codec): Traversable[String] =
-    betterFile.tokens(config, codec)
+  final def tokens(splitter: StringSplitter = StringSplitter.Default)(implicit
+    charset: Charset = DefaultCharset
+  ): Iterator[String] =
+    betterFile.tokens(splitter)(charset)
 
-  final def contentAsString(implicit codec: Codec): String = betterFile.contentAsString(codec)
+  final def contentAsString(implicit charset: Charset = DefaultCharset): String = betterFile.contentAsString(charset)
 
-  final def `!`(implicit codec: Codec): String = betterFile.`!`(codec)
+  final def `!`(implicit charset: Charset = DefaultCharset): String = betterFile.contentAsString(charset)
 
   final def printLines(lines: Iterator[Any])(implicit openOptions: OpenOptions = OpenOptions.append): this.type = {
     betterFile.printLines(lines)(openOptions)
     this
   }
 
-  final def appendLines(lines: String*)(implicit openOptions: OpenOptions = OpenOptions.append,
-                                        codec: Codec): this.type = {
-    betterFile.appendLines(lines: _*)(openOptions, codec)
+  final def appendLines(lines: String*)(implicit charset: Charset = DefaultCharset): this.type = {
+    betterFile.appendLines(lines: _*)(charset)
     this
   }
 
-  final def <<(line: String)(implicit openOptions: OpenOptions = OpenOptions.append, codec: Codec): this.type = {
-    betterFile.<<(line)(openOptions, codec)
+  final def <<(line: String)(implicit charset: Charset = DefaultCharset): this.type = {
+    betterFile.appendLines(line)(charset)
     this
   }
 
-  final def >>:(line: String)(implicit openOptions: OpenOptions = OpenOptions.append, codec: Codec): this.type = {
-    betterFile.>>:(line)(openOptions, codec)
+  final def >>:(line: String)(implicit charset: Charset = DefaultCharset): this.type = {
+    betterFile.appendLines(line)(charset)
     this
   }
 
-  final def appendLine(line: String = "")(implicit openOptions: OpenOptions = OpenOptions.append,
-                                          codec: Codec): this.type = {
-    betterFile.appendLine(line)(openOptions, codec)
+  final def appendLine(line: String = "")(implicit charset: Charset = DefaultCharset): this.type = {
+    betterFile.appendLine(line)(charset)
     this
   }
 
-  final def append(text: String)(implicit openOptions: OpenOptions = OpenOptions.append, codec: Codec): this.type = {
-    betterFile.append(text)(openOptions, codec)
-    this
-  }
-  
-  final def appendText(text: String)(implicit openOptions: OpenOptions = OpenOptions.append, codec: Codec): this.type = {
-    betterFile.appendText(text)(openOptions, codec)
+  final def append(text: String)(implicit charset: Charset = DefaultCharset): this.type = {
+    betterFile.append(text)(charset)
     this
   }
 
-  final def appendByteArray(bytes: Array[Byte])(implicit openOptions: OpenOptions): this.type = {
-    betterFile.appendByteArray(bytes)(openOptions)
+  final def appendText(text: String)(implicit charset: Charset = DefaultCharset): this.type = {
+    betterFile.appendText(text)(charset)
     this
   }
 
-  final def appendBytes(bytes: Iterator[Byte])(implicit openOptions: OpenOptions = OpenOptions.append): this.type = {
-    betterFile.appendBytes(bytes)(openOptions)
+  final def appendByteArray(bytes: Array[Byte]): this.type = {
+    betterFile.appendByteArray(bytes)
+    this
+  }
+
+  final def appendBytes(bytes: Iterator[Byte]): this.type = {
+    betterFile.appendBytes(bytes)
     this
   }
 
@@ -170,107 +178,139 @@ trait BetterFileMethods {
     this
   }
 
-  final def writeText(text: String)(implicit openOptions: OpenOptions = OpenOptions.default, codec: Codec): this.type = {
-    betterFile.writeText(text)(openOptions, codec)
-    this
-  }
-  
-  final def write(text: String)(implicit openOptions: OpenOptions = OpenOptions.default, codec: Codec): this.type = {
-    betterFile.write(text)(openOptions, codec)
+  final def writeText(
+    text: String
+  )(implicit openOptions: OpenOptions = OpenOptions.default, charset: Charset = DefaultCharset): this.type = {
+    betterFile.writeText(text)(openOptions, charset)
     this
   }
 
-  final def overwrite(text: String)(implicit openOptions: OpenOptions = OpenOptions.default,
-                                    codec: Codec): this.type = {
-    betterFile.overwrite(text)(openOptions, codec)
+  final def write(
+    text: String
+  )(implicit openOptions: OpenOptions = OpenOptions.default, charset: Charset = DefaultCharset): this.type = {
+    betterFile.write(text)(openOptions, charset)
     this
   }
 
-  final def <(text: String)(implicit openOptions: OpenOptions = OpenOptions.default, codec: Codec): this.type = {
-    betterFile.<(text)(openOptions, codec)
+  final def overwrite(
+    text: String
+  )(implicit openOptions: OpenOptions = OpenOptions.default, charset: Charset = DefaultCharset): this.type = {
+    betterFile.overwrite(text)(openOptions, charset)
     this
   }
 
-  final def `>:`(text: String)(implicit openOptions: OpenOptions = OpenOptions.default, codec: Codec): this.type = {
-    betterFile.`>:`(text)(openOptions, codec)
+  final def <(
+    text: String
+  )(implicit openOptions: OpenOptions = OpenOptions.default, charset: Charset = DefaultCharset): this.type = {
+    betterFile.write(text)(openOptions, charset)
     this
   }
 
-  final def newBufferedSource(implicit codec: Codec): BufferedSource = betterFile.newBufferedSource(codec)
+  final def `>:`(
+    text: String
+  )(implicit openOptions: OpenOptions = OpenOptions.default, charset: Charset = DefaultCharset): this.type = {
+    betterFile.write(text)(openOptions, charset)
+    this
+  }
 
-  final def bufferedSource(implicit codec: Codec): ManagedResource[BufferedSource] =
-    betterFile.bufferedSource(codec)
+  final def newBufferedSource(implicit codec: Codec): BufferedSource = Source.fromFile(toJava)(codec)
+
+  final def bufferedSource(implicit codec: Codec): Dispose[BufferedSource] =
+    newBufferedSource(codec).autoClosed
 
   final def newRandomAccess(mode: RandomAccessMode = RandomAccessMode.read): RandomAccessFile =
     betterFile.newRandomAccess(mode)
 
-  final def randomAccess(mode: RandomAccessMode = RandomAccessMode.read): ManagedResource[RandomAccessFile] =
-    betterFile.randomAccess(mode)
+  final def randomAccess(mode: RandomAccessMode = RandomAccessMode.read): Dispose[RandomAccessFile] =
+    newRandomAccess(mode).autoClosed
 
-  final def newBufferedReader(implicit codec: Codec): BufferedReader =
-    betterFile.newBufferedReader(codec)
+  final def newBufferedReader(implicit charset: Charset = DefaultCharset): BufferedReader =
+    betterFile.newBufferedReader(charset)
 
-  final def bufferedReader(implicit codec: Codec): ManagedResource[BufferedReader] =
-    betterFile.bufferedReader(codec)
+  final def bufferedReader(implicit charset: Charset = DefaultCharset): Dispose[BufferedReader] =
+    betterFile.bufferedReader(charset)
 
-  final def newBufferedWriter(implicit codec: Codec, openOptions: OpenOptions = OpenOptions.default): BufferedWriter =
-    betterFile.newBufferedWriter(codec)
+  final def newBufferedWriter(implicit
+    charset: Charset = DefaultCharset,
+    openOptions: OpenOptions = OpenOptions.default
+  ): BufferedWriter =
+    betterFile.newBufferedWriter(charset, openOptions)
 
-  final def bufferedWriter(implicit codec: Codec,
-                           openOptions: OpenOptions = OpenOptions.default): ManagedResource[BufferedWriter] =
-    betterFile.bufferedWriter(codec)
+  final def bufferedWriter(implicit
+    charset: Charset = DefaultCharset,
+    openOptions: OpenOptions = OpenOptions.default
+  ): Dispose[BufferedWriter] =
+    betterFile.bufferedWriter(charset, openOptions)
 
   final def newFileReader: FileReader = betterFile.newFileReader
 
-  final def fileReader: ManagedResource[FileReader] = betterFile.fileReader
+  final def fileReader: Dispose[FileReader] = betterFile.fileReader
 
   final def newFileWriter(append: Boolean = false): FileWriter = betterFile.newFileWriter(append)
 
-  final def fileWriter(append: Boolean = false): ManagedResource[FileWriter] = betterFile.fileWriter(append)
+  final def fileWriter(append: Boolean = false): Dispose[FileWriter] = betterFile.fileWriter(append)
 
-  final def newPrintWriter(autoFlush: Boolean = false)
-                          (implicit openOptions: OpenOptions = OpenOptions.default): PrintWriter =
+  final def newPrintWriter(autoFlush: Boolean = false)(implicit
+    openOptions: OpenOptions = OpenOptions.default
+  ): PrintWriter =
     betterFile.newPrintWriter(autoFlush)
 
-  final def printWriter(autoFlush: Boolean = false)
-                       (implicit openOptions: OpenOptions = OpenOptions.default): ManagedResource[PrintWriter] =
+  final def printWriter(autoFlush: Boolean = false)(implicit
+    openOptions: OpenOptions = OpenOptions.default
+  ): Dispose[PrintWriter] =
     betterFile.printWriter(autoFlush)
 
   final def newInputStream(implicit openOptions: OpenOptions = OpenOptions.default): InputStream =
     betterFile.newInputStream(openOptions)
 
-  final def inputStream(implicit openOptions: OpenOptions = OpenOptions.default): ManagedResource[InputStream] =
+  final def inputStream(implicit openOptions: OpenOptions = OpenOptions.default): Dispose[InputStream] =
     betterFile.inputStream(openOptions)
 
-  final def newScanner(implicit config: Scanner.Config = Scanner.Config.default): Scanner =
-    betterFile.newScanner(config)
+  final def newScanner(splitter: StringSplitter = StringSplitter.Default)(implicit
+    charset: Charset = DefaultCharset
+  ): Scanner =
+    betterFile.newScanner(splitter)(charset)
 
-  final def scanner(implicit config: Scanner.Config = Scanner.Config.default): ManagedResource[Scanner] =
-    betterFile.scanner(config)
+  final def scanner(splitter: StringSplitter = StringSplitter.Default)(implicit
+    charset: Charset = DefaultCharset
+  ): Dispose[Scanner] =
+    betterFile.scanner(splitter)(charset)
 
   final def newOutputStream(implicit openOptions: OpenOptions = OpenOptions.default): OutputStream =
     betterFile.newOutputStream(openOptions)
 
-  final def outputStream(implicit openOptions: OpenOptions = OpenOptions.default): ManagedResource[OutputStream] =
+  final def outputStream(implicit openOptions: OpenOptions = OpenOptions.default): Dispose[OutputStream] =
     betterFile.outputStream(openOptions)
 
-  final def newFileChannel(implicit openOptions: OpenOptions = OpenOptions.default,
-                           attributes: Attributes = Attributes.default): FileChannel =
+  final def newFileChannel(implicit
+    openOptions: OpenOptions = OpenOptions.default,
+    attributes: Attributes = Attributes.default
+  ): FileChannel =
     betterFile.newFileChannel(openOptions, attributes)
 
-  final def fileChannel(implicit openOptions: OpenOptions = OpenOptions.default,
-                        attributes: Attributes = Attributes.default): ManagedResource[FileChannel] =
+  final def fileChannel(implicit
+    openOptions: OpenOptions = OpenOptions.default,
+    attributes: Attributes = Attributes.default
+  ): Dispose[FileChannel] =
     betterFile.fileChannel(openOptions, attributes)
 
-  final def newAsynchronousFileChannel(implicit openOptions: OpenOptions = OpenOptions.default):
-  AsynchronousFileChannel = betterFile.newAsynchronousFileChannel(openOptions)
+  final def newAsynchronousFileChannel(implicit
+    openOptions: OpenOptions = OpenOptions.default
+  ): AsynchronousFileChannel = betterFile.newAsynchronousFileChannel(openOptions)
 
-  final def asynchronousFileChannel(implicit openOptions: OpenOptions = OpenOptions.default):
-  ManagedResource[AsynchronousFileChannel] = betterFile.asynchronousFileChannel(openOptions)
+  final def asynchronousFileChannel(implicit
+    openOptions: OpenOptions = OpenOptions.default
+  ): Dispose[AsynchronousFileChannel] = betterFile.asynchronousFileChannel(openOptions)
 
-  final def digest(algorithmName: String): Array[Byte] = betterFile.digest(algorithmName)
+  final def digest(algorithmName: String): Array[Byte] = {
+    val messageDigest = MessageDigest.getInstance(algorithmName)
+    betterFile.digest(messageDigest)
+  }
 
-  final def checksum(algorithm: String): String = betterFile.checksum(algorithm)
+  final def checksum(algorithm: String): String = {
+    val messageDigest = MessageDigest.getInstance(algorithm)
+    betterFile.checksum(messageDigest)
+  }
 
   final def md5: String = betterFile.md5
 
@@ -290,8 +330,11 @@ trait BetterFileMethods {
 
   final def isHidden: Boolean = betterFile.isHidden
 
-  final def isLocked(mode: RandomAccessMode, position: Long = 0L, size: Long = Long.MaxValue,
-                     isShared: Boolean = false): Boolean = betterFile.isLocked(mode, position, size, isShared)
+  final def isLocked(mode: RandomAccessMode,
+                     position: Long = 0L,
+                     size: Long = Long.MaxValue,
+                     isShared: Boolean = false
+  ): Boolean = betterFile.isLocked(mode, position, size, isShared)
 
   final def isReadLocked(position: Long = 0L, size: Long = Long.MaxValue, isShared: Boolean = false): Boolean =
     betterFile.isReadLocked(position, size, isShared)
@@ -309,8 +352,8 @@ trait BetterFileMethods {
 
   final def walk(maxDepth: Int = Int.MaxValue): Paths = betterFile.walk(maxDepth).map(newPath)
 
-  final def pathMatcher(syntax: PathMatcherSyntax)(pattern: String): PathMatcher =
-    betterFile.pathMatcher(syntax)(pattern)
+  final def pathMatcher(syntax: PathMatcherSyntax, includePath: Boolean)(pattern: String): PathMatcher =
+    betterFile.pathMatcher(syntax, includePath)(pattern)
 
   final def glob(pattern: String): Paths = betterFile.glob(pattern).map(newPath)
 
@@ -342,7 +385,7 @@ trait BetterFileMethods {
   }
 
   // Conflicts with the legacy cromwell.core.path.Obsolete.PathMethodAliases.getFileName(). Uncomment when that's gone.
-  //final def apply(permission: PosixFilePermission): Boolean = betterFile.apply(permission)
+  // final def apply(permission: PosixFilePermission): Boolean = betterFile.apply(permission)
 
   final def isOwnerReadable: Boolean = betterFile.isOwnerReadable
 
@@ -356,15 +399,15 @@ trait BetterFileMethods {
 
   final def isGroupExecutable: Boolean = betterFile.isGroupExecutable
 
-  final def isOtherReadable: Boolean = betterFile.isOtherReadable
+  final def isOthersReadable: Boolean = betterFile.isOthersReadable
 
-  final def isOtherWritable: Boolean = betterFile.isOtherWritable
+  final def isOthersWritable: Boolean = betterFile.isOthersWritable
 
-  final def isOtherExecutable: Boolean = betterFile.isOtherExecutable
+  final def isOthersExecutable: Boolean = betterFile.isOthersExecutable
 
   final def isReadable: Boolean = betterFile.isReadable
 
-  final def isWriteable: Boolean = betterFile.isWriteable
+  final def isWriteable: Boolean = betterFile.isWritable
 
   final def isExecutable: Boolean = betterFile.isExecutable
 
@@ -399,9 +442,9 @@ trait BetterFileMethods {
     this
   }
 
-  final def touch(time: Instant = Instant.now())
-                 (implicit attributes: Attributes = Attributes.default,
-                  linkOptions: LinkOptions = LinkOptions.default): this.type = {
+  final def touch(
+    time: Instant = Instant.now()
+  )(implicit attributes: Attributes = Attributes.default, linkOptions: LinkOptions = LinkOptions.default): this.type = {
     betterFile.touch(time)(attributes, linkOptions)
     this
   }
@@ -417,23 +460,25 @@ trait BetterFileMethods {
   final def renameTo(newName: String): Path = newPath(betterFile.renameTo(newName))
 
   final def moveTo(destination: Path, overwrite: Boolean = false): destination.type = {
-    betterFile.moveTo(destination.betterFile, overwrite)
+    betterFile.moveTo(destination.betterFile)(CopyOptions(overwrite = overwrite))
     destination
   }
 
   final def copyTo(destination: Path, overwrite: Boolean = false): destination.type = {
-    betterFile.copyTo(destination.betterFile, overwrite)
+    betterFile.copyTo(destination.betterFile, overwrite)(copyOptions = CopyOptions(overwrite = overwrite))
     destination
   }
 
-  final def symbolicLinkTo(destination: Path)
-                          (implicit attributes: Attributes = Attributes.default): destination.type = {
+  final def symbolicLinkTo(
+    destination: Path
+  )(implicit attributes: Attributes = Attributes.default): destination.type = {
     betterFile.symbolicLinkTo(destination.betterFile)(attributes)
     destination
   }
 
-  final def linkTo(destination: Path, symbolic: Boolean = false)
-                  (implicit attributes: Attributes = Attributes.default): destination.type = {
+  final def linkTo(destination: Path, symbolic: Boolean = false)(implicit
+    attributes: Attributes = Attributes.default
+  ): destination.type = {
     betterFile.linkTo(destination.betterFile, symbolic)(attributes)
     destination
   }
@@ -451,7 +496,7 @@ trait BetterFileMethods {
 
   final def isSimilarContentAs(that: Path): Boolean = betterFile.isSimilarContentAs(that.betterFile)
 
-  final def =!=(that: Path): Boolean = betterFile.=!=(that.betterFile)
+  final def =!=(that: Path): Boolean = !betterFile.isSameContentAs(that.betterFile)
 
   final def isEmpty: Boolean = betterFile.isEmpty
 
@@ -460,21 +505,24 @@ trait BetterFileMethods {
     this
   }
 
-  final def zipTo(destination: Path, compressionLevel: Int = Deflater.DEFAULT_COMPRESSION)
-                 (implicit codec: Codec): destination.type = {
-    betterFile.zipTo(destination.betterFile, compressionLevel)(codec)
+  final def zipTo(destination: Path, compressionLevel: Int = Deflater.DEFAULT_COMPRESSION)(implicit
+    charset: Charset = DefaultCharset
+  ): destination.type = {
+    betterFile.zipTo(destination.betterFile, compressionLevel)(charset)
     destination
   }
 
-  final def zip(compressionLevel: Int = Deflater.DEFAULT_COMPRESSION)(implicit codec: Codec): Path =
-    newPath(betterFile.zip(compressionLevel)(codec))
+  final def zip(compressionLevel: Int = Deflater.DEFAULT_COMPRESSION)(implicit
+    charset: Charset = DefaultCharset
+  ): Path =
+    newPath(betterFile.zip(compressionLevel)(charset))
 
-  final def unzipTo(destination: Path)(implicit codec: Codec): destination.type = {
-    betterFile.unzipTo(destination.betterFile)(codec)
+  final def unzipTo(destination: Path)(implicit charset: Charset = DefaultCharset): destination.type = {
+    betterFile.unzipTo(destination.betterFile)(charset)
     destination
   }
 
-  final def unzip()(implicit codec: Codec): Path = newPath(betterFile.unzip()(codec))
+  final def unzip()(implicit charset: Charset = DefaultCharset): Path = newPath(betterFile.unzip()(charset))
 }
 
 object BetterFileMethods {
@@ -489,6 +537,8 @@ object BetterFileMethods {
 
   def currentWorkingDirectory: Path = DefaultPath(better.files.File.currentWorkingDirectory.path)
 
+  val DefaultCharset: Charset = Charset.defaultCharset()
+
   object Cmds {
     def ~ : Path = BetterFileMethods.home
 
@@ -496,9 +546,9 @@ object BetterFileMethods {
 
     def cwd: Path = pwd
 
-    val `..`: Path => Path = _.parent
+    val `..` : Path => Path = _.parent
 
-    val `.`: Path => Path = identity
+    val `.` : Path => Path = identity
 
     implicit class FileDsl(file: Path) {
       def /(f: Path => Path): Path = f(file)
@@ -542,7 +592,8 @@ object BetterFileMethods {
 
     def chgrp(group: String, file: Path): Path = file.setGroup(group)
 
-    def chmod(permissions: String, file: Path): Path = file.setPermissions(PosixFilePermissions.fromString(permissions).asScala.toSet)
+    def chmod(permissions: String, file: Path): Path =
+      file.setPermissions(PosixFilePermissions.fromString(permissions).asScala.toSet)
 
     def chmod_+(permission: PosixFilePermission, file: Path): Path = file.addPermission(permission)
 
@@ -550,14 +601,15 @@ object BetterFileMethods {
 
     def stat(file: Path): PosixFileAttributes = file.posixAttributes
 
-    def unzip(zipFile: Path)(destination: Path)(implicit codec: Codec): destination.type =
-      zipFile.unzipTo(destination)(codec)
+    def unzip(zipFile: Path)(destination: Path)(implicit charset: Charset = DefaultCharset): destination.type =
+      zipFile.unzipTo(destination)(charset)
 
-    def zip(files: Path*)(destination: Path, compressionLevel: Int = Deflater.DEFAULT_COMPRESSION)
-           (implicit codec: Codec): destination.type = {
-      better.files.Cmds.zip(files.map(_.betterFile): _*)(destination.betterFile, compressionLevel)
-      destination
-    }
+    def zip(
+      files: better.files.File*
+    )(destination: better.files.File, compressionLevel: Int = Deflater.DEFAULT_COMPRESSION)(implicit
+      charset: Charset = DefaultCharset
+    ): destination.type =
+      destination.zipIn(files.iterator, compressionLevel)(charset)
   }
 
   type PathMatcherSyntax = better.files.File.PathMatcherSyntax
@@ -592,7 +644,4 @@ object BetterFileMethods {
 
   type JFile = java.io.File
   type Paths = Iterator[Path]
-
-  type Closable = better.files.Closeable
-  type ManagedResource[A <: Closable] = better.files.ManagedResource[A]
 }

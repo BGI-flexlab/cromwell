@@ -1,6 +1,7 @@
 package cromwell.engine
 
-import wdl4s._
+import akka.actor.ActorRef
+import wdl.draft2.model._
 
 import scala.util.{Failure, Success, Try}
 
@@ -12,7 +13,9 @@ final case class CallAttempt(fqn: FullyQualifiedName, attempt: Int)
 object WorkflowFailureMode {
   def tryParse(mode: String): Try[WorkflowFailureMode] = {
     val modes = Seq(ContinueWhilePossible, NoNewCalls)
-    modes find { _.toString.equalsIgnoreCase(mode) } map { Success(_) } getOrElse Failure(new Exception(s"Invalid workflow failure mode: $mode"))
+    modes find { _.toString.equalsIgnoreCase(mode) } map { Success(_) } getOrElse Failure(
+      new Exception(s"Invalid workflow failure mode: $mode")
+    )
   }
 }
 sealed trait WorkflowFailureMode {
@@ -20,3 +23,5 @@ sealed trait WorkflowFailureMode {
 }
 case object ContinueWhilePossible extends WorkflowFailureMode { override val allowNewCallsAfterFailure = true }
 case object NoNewCalls extends WorkflowFailureMode { override val allowNewCallsAfterFailure = false }
+
+case class SubWorkflowStart(actorRef: ActorRef)

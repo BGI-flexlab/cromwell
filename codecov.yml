@@ -1,0 +1,25 @@
+codecov:
+  branch: develop
+
+coverage:
+  range: 50..75
+  round: down
+  precision: 2
+
+  # Coverage is tracked but not enforced — Codecov would fail PRs before all suites finish reporting.
+  status:
+    project:
+      default:
+        base: pr
+        target: 0%
+        threshold: 0%
+    patch: # coverage report for the PR changes only
+      default:
+        base: pr
+        target: 0%
+        threshold: 0% # no required threshold for patch
+
+comment: off
+
+github_checks:
+  annotations: false

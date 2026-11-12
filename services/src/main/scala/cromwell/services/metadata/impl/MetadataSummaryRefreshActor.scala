@@ -1,13 +1,16 @@
 package cromwell.services.metadata.impl
 
-
 import akka.actor.{ActorRef, LoggingFSM, Props}
-import com.typesafe.config.ConfigFactory
+import cats.data.NonEmptyList
 import cromwell.core.Dispatcher.ServiceDispatcher
-import cromwell.services.SingletonServicesStore
+import cromwell.core.instrumentation.InstrumentationPrefixes
+import cromwell.services.MetadataServicesStore
+import cromwell.services.instrumentation.AsynchronousThrottlingGaugeMetricActor.CalculateMetricValue
+import cromwell.services.instrumentation.{AsynchronousThrottlingGaugeMetricActor, CromwellInstrumentation}
 import cromwell.services.metadata.impl.MetadataSummaryRefreshActor._
 
 import scala.util.{Failure, Success}
+import scala.concurrent.ExecutionContext
 
 /**
   * This looks for workflows whose metadata summaries are in need of refreshing and refreshes those summaries.
@@ -18,11 +21,12 @@ import scala.util.{Failure, Success}
 
 object MetadataSummaryRefreshActor {
   sealed trait MetadataSummaryActorMessage
-  final case class SummarizeMetadata(respondTo: ActorRef) extends MetadataSummaryActorMessage
+  final case class SummarizeMetadata(limit: Int, respondTo: ActorRef) extends MetadataSummaryActorMessage
   case object MetadataSummarySuccess extends MetadataSummaryActorMessage
   final case class MetadataSummaryFailure(t: Throwable) extends MetadataSummaryActorMessage
 
-  def props() = Props(new MetadataSummaryRefreshActor()).withDispatcher(ServiceDispatcher)
+  def props(serviceRegistryActor: ActorRef) =
+    Props(new MetadataSummaryRefreshActor(serviceRegistryActor)).withDispatcher(ServiceDispatcher)
 
   sealed trait SummaryRefreshState
   case object WaitingForRequest extends SummaryRefreshState
@@ -32,36 +36,59 @@ object MetadataSummaryRefreshActor {
   case object SummaryRefreshData
 }
 
-class MetadataSummaryRefreshActor()
-  extends LoggingFSM[SummaryRefreshState, SummaryRefreshData.type] with MetadataDatabaseAccess with SingletonServicesStore {
+class MetadataSummaryRefreshActor(override val serviceRegistryActor: ActorRef)
+    extends LoggingFSM[SummaryRefreshState, SummaryRefreshData.type]
+    with MetadataDatabaseAccess
+    with MetadataServicesStore
+    with CromwellInstrumentation {
 
-  val config = ConfigFactory.load
-  implicit val ec = context.dispatcher
+  implicit val ec: ExecutionContext = context.dispatcher
+
+  private val summaryMetricsGapsPath: NonEmptyList[String] =
+    MetadataServiceActor.MetadataInstrumentationPrefix :+ "summarizer" :+ "gap"
+  private val summaryMetricsProcessedPath: NonEmptyList[String] =
+    MetadataServiceActor.MetadataInstrumentationPrefix :+ "summarizer" :+ "processed"
+
+  val increasingGapPath = summaryMetricsGapsPath :+ "increasing"
+  val decreasingGapPath = summaryMetricsGapsPath :+ "decreasing"
+
+  val increasingProcessedPath = summaryMetricsProcessedPath :+ "increasing"
+  val decreasingProcessedPath = summaryMetricsProcessedPath :+ "decreasing"
+
+  private val instrumentationPrefix: Option[String] = InstrumentationPrefixes.ServicesPrefix
+
+  private val summarizerQueueIncreasingGapMetricActor =
+    context.actorOf(
+      AsynchronousThrottlingGaugeMetricActor.props(increasingGapPath, instrumentationPrefix, serviceRegistryActor)
+    )
 
   startWith(WaitingForRequest, SummaryRefreshData)
 
-  when (WaitingForRequest) {
-    case (Event(SummarizeMetadata(respondTo), data)) =>
-      refreshWorkflowMetadataSummaries() onComplete {
-        case Success(id) =>
-          respondTo ! MetadataSummarySuccess
-          self ! MetadataSummaryComplete
-        case Failure(t) =>
-          log.error(t, "Failed to summarize metadata")
-          respondTo ! MetadataSummaryFailure(t)
-          self ! MetadataSummaryComplete
-      }
-      goto(SummarizingMetadata)
+  when(WaitingForRequest) { case Event(SummarizeMetadata(limit, respondTo), _) =>
+    refreshWorkflowMetadataSummaries(limit) onComplete {
+      case Success(summaryResult) =>
+        summarizerQueueIncreasingGapMetricActor ! CalculateMetricValue(ec => getSummaryQueueSize()(ec))
+        sendGauge(decreasingGapPath, summaryResult.decreasingGap, instrumentationPrefix)
+
+        count(increasingProcessedPath, summaryResult.rowsProcessedIncreasing, instrumentationPrefix)
+        count(decreasingProcessedPath, summaryResult.rowsProcessedDecreasing, instrumentationPrefix)
+
+        respondTo ! MetadataSummarySuccess
+        self ! MetadataSummaryComplete
+      case Failure(t) =>
+        log.error(t, "Failed to summarize metadata")
+        respondTo ! MetadataSummaryFailure(t)
+        self ! MetadataSummaryComplete
+    }
+    goto(SummarizingMetadata)
   }
 
-  when (SummarizingMetadata) {
-    case Event(MetadataSummaryComplete, _) =>
-      goto(WaitingForRequest) using SummaryRefreshData
+  when(SummarizingMetadata) { case Event(MetadataSummaryComplete, _) =>
+    goto(WaitingForRequest) using SummaryRefreshData
   }
 
-  whenUnhandled {
-    case Event(wut, _) =>
-      log.warning("Unrecognized or unexpected message while in state '{}': {}", stateName, wut)
-      stay()
+  whenUnhandled { case Event(wut, _) =>
+    log.warning("Unrecognized or unexpected message while in state '{}': {}", stateName, wut)
+    stay()
   }
 }

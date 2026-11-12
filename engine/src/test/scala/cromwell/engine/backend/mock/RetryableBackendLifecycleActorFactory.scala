@@ -2,25 +2,34 @@ package cromwell.engine.backend.mock
 
 import akka.actor.{ActorRef, Props}
 import cromwell.backend._
-import wdl4s.TaskCall
-import wdl4s.expression.{NoFunctions, WdlStandardLibraryFunctions}
+import wom.expression.{IoFunctionSet, NoIoFunctionSet}
+import wom.graph.CommandCallNode
 
-class RetryableBackendLifecycleActorFactory(name: String, configurationDescriptor: BackendConfigurationDescriptor)
-  extends BackendLifecycleActorFactory {
+import scala.concurrent.ExecutionContext
+
+class RetryableBackendLifecycleActorFactory(val name: String,
+                                            val configurationDescriptor: BackendConfigurationDescriptor
+) extends BackendLifecycleActorFactory {
   override def workflowInitializationActorProps(workflowDescriptor: BackendWorkflowDescriptor,
                                                 ioActor: ActorRef,
-                                                calls: Set[TaskCall],
-                                                serviceRegistryActor: ActorRef): Option[Props] = None
+                                                calls: Set[CommandCallNode],
+                                                serviceRegistryActor: ActorRef,
+                                                restarting: Boolean
+  ): Option[Props] = None
 
   override def jobExecutionActorProps(jobDescriptor: BackendJobDescriptor,
                                       initializationData: Option[BackendInitializationData],
                                       serviceRegistryActor: ActorRef,
                                       ioActor: ActorRef,
-                                      backendSingletonActor: Option[ActorRef]): Props = {
+                                      backendSingletonActor: Option[ActorRef],
+                                      groupMetricsActor: ActorRef
+  ): Props =
     RetryableBackendJobExecutionActor.props(jobDescriptor, configurationDescriptor)
-  }
 
   override def expressionLanguageFunctions(workflowDescriptor: BackendWorkflowDescriptor,
                                            jobKey: BackendJobDescriptorKey,
-                                           initializationData: Option[BackendInitializationData]): WdlStandardLibraryFunctions = NoFunctions
+                                           initializationData: Option[BackendInitializationData],
+                                           ioActorProxy: ActorRef,
+                                           ec: ExecutionContext
+  ): IoFunctionSet = NoIoFunctionSet
 }

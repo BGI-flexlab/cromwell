@@ -1,9 +1,9 @@
 package cromwell.jobstore
 
-import cromwell.core.JobOutput
-import cromwell.util.JsonFormatting.WdlValueJsonFormatter
-import WdlValueJsonFormatter.WdlValueJsonFormat
+import cromwell.util.JsonFormatting.WomValueJsonFormatter.WomValueJsonFormat
+import cromwell.core.CallOutputs
 import spray.json.{DefaultJsonProtocol, JsValue, RootJsonFormat, _}
+import wom.JobOutput
 
 object JobResultJsonFormatter extends DefaultJsonProtocol {
   implicit object ThrowableFormat extends RootJsonFormat[Throwable] {
@@ -12,12 +12,21 @@ object JobResultJsonFormatter extends DefaultJsonProtocol {
   }
 
   implicit object JobOutputFormat extends RootJsonFormat[JobOutput] {
-    def write(value: JobOutput) = value.wdlValue.toJson
-    def read(value: JsValue): JobOutput = JobOutput(WdlValueJsonFormat.read(value))
+    def write(value: JobOutput) = value.womValue.toJson
+    def read(value: JsValue): JobOutput = JobOutput(WomValueJsonFormat.read(value))
   }
 
-  implicit val JobResultSuccessFormat = jsonFormat2(JobResultSuccess)
-  implicit val JobResultFailureFormat = jsonFormat3(JobResultFailure)
+  implicit object CallOutputsFormat extends RootJsonFormat[CallOutputs] {
+    def write(value: CallOutputs) = value.outputs.map { case (port, v) =>
+      port.identifier.fullyQualifiedName.value -> v
+    }.toJson
+    def read(value: JsValue): CallOutputs = throw new UnsupportedOperationException(
+      "Cannot deserialize outputs to output ports"
+    )
+  }
+
+  implicit val JobResultSuccessFormat: RootJsonFormat[JobResultSuccess] = jsonFormat2(JobResultSuccess)
+  implicit val JobResultFailureFormat: RootJsonFormat[JobResultFailure] = jsonFormat3(JobResultFailure)
 
   implicit object JobResultFormat extends RootJsonFormat[JobResult] {
     def write(value: JobResult) = JsObject(

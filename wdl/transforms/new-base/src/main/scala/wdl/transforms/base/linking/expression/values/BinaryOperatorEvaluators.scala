@@ -1,0 +1,72 @@
+package wdl.transforms.base.linking.expression.values
+
+import cats.syntax.validated._
+import common.validation.Validation._
+import common.validation.ErrorOr.ErrorOr
+import common.validation.ErrorOr._
+import wdl.model.draft3.elements.ExpressionElement
+import wdl.model.draft3.elements.ExpressionElement._
+import wdl.model.draft3.graph.expression.{EvaluatedValue, ForCommandInstantiationOptions, ValueEvaluator}
+import wdl.model.draft3.graph.expression.ValueEvaluator.ops._
+import wom.OptionalNotSuppliedException
+import wom.expression.IoFunctionSet
+import wom.types.WomStringType
+import wom.values.{WomBoolean, WomOptionalValue, WomValue}
+
+import scala.util.Try
+
+object BinaryOperatorEvaluators {
+  implicit val logicalOrEvaluator: ValueEvaluator[LogicalOr] =
+    forOperationWithShortCircuit(_.or(_), shortCircuit = { case WomBoolean(true) => WomBoolean(true) })
+  implicit val logicalAndEvaluator: ValueEvaluator[LogicalAnd] =
+    forOperationWithShortCircuit(_.and(_), shortCircuit = { case WomBoolean(false) => WomBoolean(false) })
+  implicit val equalsEvaluator: ValueEvaluator[Equals] = forOperation(_.equals(_))
+  implicit val notEqualsEvaluator: ValueEvaluator[NotEquals] = forOperation(_.notEquals(_))
+  implicit val lessThanEvaluator: ValueEvaluator[LessThan] = forOperation(_.lessThan(_))
+  implicit val lessThanOrEqualEvaluator: ValueEvaluator[LessThanOrEquals] = forOperation(_.lessThanOrEqual(_))
+  implicit val greaterThanEvaluator: ValueEvaluator[GreaterThan] = forOperation(_.greaterThan(_))
+  implicit val greaterThanOrEqualEvaluator: ValueEvaluator[GreaterThanOrEquals] = forOperation(_.greaterThanOrEqual(_))
+  implicit val addEvaluator: ValueEvaluator[Add] = forOperation(_.add(_))
+  implicit val subtractEvaluator: ValueEvaluator[Subtract] = forOperation(_.subtract(_))
+  implicit val multiplyEvaluator: ValueEvaluator[Multiply] = forOperation(_.multiply(_))
+  implicit val divideEvaluator: ValueEvaluator[Divide] = forOperation(_.divide(_))
+  implicit val remainderEvaluator: ValueEvaluator[Remainder] = forOperation(_.mod(_))
+
+  private def forOperation[A <: BinaryOperation](op: (WomValue, WomValue) => Try[WomValue]): ValueEvaluator[A] =
+    forOperationWithShortCircuit(op, PartialFunction.empty[WomValue, WomValue])
+
+  private def forOperationWithShortCircuit[A <: BinaryOperation](op: (WomValue, WomValue) => Try[WomValue],
+                                                                 shortCircuit: PartialFunction[WomValue, WomValue]
+  ) = new ValueEvaluator[A] {
+    override def evaluateValue(a: A,
+                               inputs: Map[String, WomValue],
+                               ioFunctionSet: IoFunctionSet,
+                               forCommandInstantiationOptions: Option[ForCommandInstantiationOptions]
+    )(implicit expressionValueEvaluator: ValueEvaluator[ExpressionElement]): ErrorOr[EvaluatedValue[_ <: WomValue]] =
+      a.left.evaluateValue(inputs, ioFunctionSet, forCommandInstantiationOptions) flatMap { left =>
+        if (shortCircuit.isDefinedAt(left.value)) {
+          EvaluatedValue(shortCircuit(left.value), left.sideEffectFiles).validNel
+        } else {
+          a.right.evaluateValue(inputs, ioFunctionSet, forCommandInstantiationOptions) flatMap { right =>
+            val rawResult = op(left.value, right.value)
+
+            // Operations with empty optionals generally fail.
+            // However, if we're instantiating a command or prepending a string, return an empty option of string.
+            // https://github.com/openwdl/wdl/blob/main/versions/1.0/SPEC.md#prepending-a-string-to-an-optional-parameter
+            val handleOptionals = rawResult.recover {
+              case OptionalNotSuppliedException(_) if forCommandInstantiationOptions.isDefined =>
+                WomOptionalValue(WomStringType, None)
+              case OptionalNotSuppliedException(_) =>
+                left.value.womType match {
+                  case WomStringType => WomOptionalValue(WomStringType, None)
+                }
+            }
+
+            handleOptionals.toErrorOr map { newValue =>
+              EvaluatedValue(newValue, left.sideEffectFiles ++ right.sideEffectFiles)
+            }
+          }
+        }
+      }
+  }
+}

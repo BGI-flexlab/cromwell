@@ -5,7 +5,7 @@ import java.time.format.DateTimeFormatter
 import java.time.{OffsetDateTime, ZoneId, ZoneOffset}
 
 import org.slf4j.LoggerFactory
-import wdl4s.values.{WdlBoolean, WdlFloat, WdlInteger, WdlValue}
+import wom.values._
 
 object MetadataStatement {
   val WorkflowIdIdx = 1
@@ -42,25 +42,23 @@ class MetadataStatementForWorkflow(preparedStatement: PreparedStatement, workflo
   val dawn = OffsetDateTime.of(0, 1, 1, 0, 0, 0, 0, ZoneOffset.UTC).toSystemTimestamp
   var batchSizeCounter: Int = 0
 
-  private def metadataType(value: Any) = {
+  private def metadataType(value: Any) =
     value match {
-      case WdlInteger(i) => "int"
-      case WdlFloat(f) => "number"
-      case WdlBoolean(b) => "boolean"
-      case value: WdlValue => "string"
+      case WomInteger(_) => "int"
+      case WomFloat(_) => "number"
+      case WomBoolean(_) => "boolean"
+      case _: WomValue => "string"
       case _: Int | Long => "int"
       case _: Double | Float => "number"
       case _: Boolean => "boolean"
-      case _ =>"string"
+      case _ => "string"
     }
-  }
 
-  private def metadataValue(value: Any) = {
+  private def metadataValue(value: Any) =
     value match {
-      case v: WdlValue  => v.valueString
+      case v: WomValue => v.valueString
       case v => v.toString
     }
-  }
 
   protected def setStatement() = {
     preparedStatement.setString(MetadataStatement.WorkflowIdIdx, workflowId)
@@ -93,12 +91,11 @@ class MetadataStatementForWorkflow(preparedStatement: PreparedStatement, workflo
   }
 
   /** Adds a non-null value to the metadata journal. */
-  override def addKeyValue(key: String, value: Any) = {
+  override def addKeyValue(key: String, value: Any) =
     if (value != null) {
       preparedStatement.setTimestamp(MetadataStatement.TimestampIdx, OffsetDateTime.now().toSystemTimestamp)
       add(key, value, s"Failed to migrate metadata value $value with key $key for workflow $workflowId")
     }
-  }
 
   override def addEmptyValue(key: String): Unit = {
     preparedStatement.setTimestamp(MetadataStatement.TimestampIdx, dawn)
@@ -106,7 +103,12 @@ class MetadataStatementForWorkflow(preparedStatement: PreparedStatement, workflo
   }
 }
 
-class MetadataStatementForCall(preparedStatement: PreparedStatement, workflowId: String, callFqn: String, index: Int, attempt: Int) extends MetadataStatementForWorkflow(preparedStatement, workflowId) {
+class MetadataStatementForCall(preparedStatement: PreparedStatement,
+                               workflowId: String,
+                               callFqn: String,
+                               index: Int,
+                               attempt: Int
+) extends MetadataStatementForWorkflow(preparedStatement, workflowId) {
   override def setStatement() = {
     preparedStatement.setString(MetadataStatement.WorkflowIdIdx, workflowId)
     preparedStatement.setString(MetadataStatement.CallFqnIdx, callFqn)

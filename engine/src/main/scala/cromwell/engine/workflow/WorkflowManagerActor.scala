@@ -1,26 +1,33 @@
 package cromwell.engine.workflow
 
+import java.util.concurrent.atomic.AtomicInteger
 import akka.actor.FSM.{CurrentState, SubscribeTransitionCallBack, Transition}
 import akka.actor._
 import akka.event.Logging
 import cats.data.NonEmptyList
-import com.typesafe.config.{Config, ConfigFactory}
+import com.typesafe.config.Config
+import common.exception.ThrowableAggregation
 import cromwell.backend.async.KnownJobFailureException
+import cromwell.backend.standard.callcaching.{CallCachingBlacklistManager, RootWorkflowFileHashCacheActor}
 import cromwell.core.Dispatcher.EngineDispatcher
-import cromwell.core.{WorkflowAborted, WorkflowId}
+import cromwell.core.events.MaxMetadataAlert
+import cromwell.core.{WorkflowId, WorkflowState}
+import cromwell.engine.SubWorkflowStart
 import cromwell.engine.backend.BackendSingletonCollection
 import cromwell.engine.workflow.WorkflowActor._
 import cromwell.engine.workflow.WorkflowManagerActor._
-import cromwell.engine.workflow.lifecycle.execution.WorkflowMetadataHelper
-import cromwell.engine.workflow.workflowstore.{WorkflowStoreActor, WorkflowStoreEngineActor, WorkflowStoreState}
+import cromwell.engine.workflow.tokens.JobTokenDispenserActor.{FetchLimitedGroups, ReplyLimitedGroups}
+import cromwell.engine.workflow.workflowstore.{WorkflowHeartbeatConfig, WorkflowStoreActor, WorkflowStoreEngineActor}
 import cromwell.jobstore.JobStoreActor.{JobStoreWriteFailure, JobStoreWriteSuccess, RegisterWorkflowCompleted}
 import cromwell.webservice.EngineStatsActor
-import lenthall.exception.ThrowableAggregation
+import mouse.boolean._
 import net.ceedubs.ficus.Ficus._
 import org.apache.commons.lang3.exception.ExceptionUtils
 
+import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
-import scala.sys.ShutdownHookThread
+import scala.util.Try
+import scala.util.control.NoStackTrace
 
 object WorkflowManagerActor {
   val DefaultMaxWorkflowsToRun = 5000
@@ -31,32 +38,62 @@ object WorkflowManagerActor {
   class WorkflowNotFoundException(s: String) extends Exception(s)
 
   sealed trait WorkflowManagerActorMessage
+
   /**
     * Commands
     */
+  case object PreventNewWorkflowsFromStarting extends WorkflowManagerActorMessage
   sealed trait WorkflowManagerActorCommand extends WorkflowManagerActorMessage
+  case object RetrieveNewWorkflowsKey
   case object RetrieveNewWorkflows extends WorkflowManagerActorCommand
-  final case class AbortWorkflowCommand(id: WorkflowId, replyTo: ActorRef) extends WorkflowManagerActorCommand
   case object AbortAllWorkflowsCommand extends WorkflowManagerActorCommand
   final case class SubscribeToWorkflowCommand(id: WorkflowId) extends WorkflowManagerActorCommand
   case object EngineStatsCommand extends WorkflowManagerActorCommand
+  case class AbortWorkflowsCommand(ids: Set[WorkflowId]) extends WorkflowManagerActorCommand
+  final case class WorkflowActorWorkComplete(id: WorkflowId, actor: ActorRef, finalState: WorkflowState)
+      extends WorkflowManagerActorCommand
 
-  def props(workflowStore: ActorRef,
+  def props(config: Config,
+            callCachingEnabled: Boolean,
+            invalidateBadCacheResults: Boolean,
+            workflowStore: ActorRef,
             ioActor: ActorRef,
             serviceRegistryActor: ActorRef,
             workflowLogCopyRouter: ActorRef,
+            workflowCallbackActor: Option[ActorRef],
             jobStoreActor: ActorRef,
             subWorkflowStoreActor: ActorRef,
             callCacheReadActor: ActorRef,
             callCacheWriteActor: ActorRef,
             dockerHashActor: ActorRef,
-            jobTokenDispenserActor: ActorRef,
+            jobRestartCheckTokenDispenserActor: ActorRef,
+            jobExecutionTokenDispenserActor: ActorRef,
             backendSingletonCollection: BackendSingletonCollection,
-            abortJobsOnTerminate: Boolean,
-            serverMode: Boolean): Props = {
-    val params = WorkflowManagerActorParams(ConfigFactory.load, workflowStore, ioActor, serviceRegistryActor,
-      workflowLogCopyRouter, jobStoreActor, subWorkflowStoreActor, callCacheReadActor, callCacheWriteActor, dockerHashActor, jobTokenDispenserActor, backendSingletonCollection,
-      abortJobsOnTerminate, serverMode)
+            serverMode: Boolean,
+            workflowHeartbeatConfig: WorkflowHeartbeatConfig,
+            groupMetricsActor: ActorRef
+  ): Props = {
+    val params = WorkflowManagerActorParams(
+      config = config,
+      callCachingEnabled = callCachingEnabled,
+      invalidateBadCacheResults = invalidateBadCacheResults,
+      workflowStore = workflowStore,
+      ioActor = ioActor,
+      serviceRegistryActor = serviceRegistryActor,
+      workflowLogCopyRouter = workflowLogCopyRouter,
+      workflowCallbackActor = workflowCallbackActor,
+      jobStoreActor = jobStoreActor,
+      subWorkflowStoreActor = subWorkflowStoreActor,
+      callCacheReadActor = callCacheReadActor,
+      callCacheWriteActor = callCacheWriteActor,
+      dockerHashActor = dockerHashActor,
+      jobRestartCheckTokenDispenserActor = jobRestartCheckTokenDispenserActor,
+      jobExecutionTokenDispenserActor = jobExecutionTokenDispenserActor,
+      backendSingletonCollection = backendSingletonCollection,
+      serverMode = serverMode,
+      workflowHeartbeatConfig = workflowHeartbeatConfig,
+      groupMetricsActor = groupMetricsActor
+    )
     Props(new WorkflowManagerActor(params)).withDispatcher(EngineDispatcher)
   }
 
@@ -65,14 +102,17 @@ object WorkflowManagerActor {
     */
   sealed trait WorkflowManagerState
   case object Running extends WorkflowManagerState
+  case object RunningAndNotStartingNewWorkflows extends WorkflowManagerState
   case object Aborting extends WorkflowManagerState
   case object Done extends WorkflowManagerState
 
   /**
     * Data
     */
-  case class WorkflowManagerData(workflows: Map[WorkflowId, ActorRef]) {
+  case class WorkflowManagerData(workflows: Map[WorkflowId, ActorRef], subWorkflows: Set[ActorRef]) {
     def idFromActor(actor: ActorRef): Option[WorkflowId] = workflows.collectFirst { case (id, a) if a == actor => id }
+
+    def actorForId(id: WorkflowId): Option[ActorRef] = workflows.get(id)
 
     def withAddition(entries: NonEmptyList[WorkflowIdToActorRef]): WorkflowManagerData = {
       val entryTuples = entries map { e => e.workflowId -> e.workflowActor }
@@ -80,165 +120,149 @@ object WorkflowManagerActor {
     }
 
     def without(id: WorkflowId): WorkflowManagerData = this.copy(workflows = workflows - id)
-    def without(actor: ActorRef): WorkflowManagerData = {
+    def without(actor: ActorRef): WorkflowManagerData =
       // If the ID was found in the lookup return a modified copy of the state data, otherwise just return
       // the same state data.
       idFromActor(actor) map without getOrElse this
-    }
   }
 }
 
 case class WorkflowManagerActorParams(config: Config,
+                                      callCachingEnabled: Boolean,
+                                      invalidateBadCacheResults: Boolean,
                                       workflowStore: ActorRef,
                                       ioActor: ActorRef,
                                       serviceRegistryActor: ActorRef,
                                       workflowLogCopyRouter: ActorRef,
+                                      workflowCallbackActor: Option[ActorRef],
                                       jobStoreActor: ActorRef,
                                       subWorkflowStoreActor: ActorRef,
                                       callCacheReadActor: ActorRef,
                                       callCacheWriteActor: ActorRef,
                                       dockerHashActor: ActorRef,
-                                      jobTokenDispenserActor: ActorRef,
+                                      jobRestartCheckTokenDispenserActor: ActorRef,
+                                      jobExecutionTokenDispenserActor: ActorRef,
                                       backendSingletonCollection: BackendSingletonCollection,
-                                      abortJobsOnTerminate: Boolean,
-                                      serverMode: Boolean)
+                                      serverMode: Boolean,
+                                      workflowHeartbeatConfig: WorkflowHeartbeatConfig,
+                                      groupMetricsActor: ActorRef
+)
 
 class WorkflowManagerActor(params: WorkflowManagerActorParams)
-  extends LoggingFSM[WorkflowManagerState, WorkflowManagerData] with WorkflowMetadataHelper {
+    extends LoggingFSM[WorkflowManagerState, WorkflowManagerData]
+    with WorkflowMetadataHelper
+    with Timers {
 
   private val config = params.config
+  private val callCachingEnabled: Boolean = params.callCachingEnabled
+  private val invalidateBadCacheResults = params.invalidateBadCacheResults
   override val serviceRegistryActor = params.serviceRegistryActor
 
-  private val maxWorkflowsRunning = config.getConfig("system").as[Option[Int]]("max-concurrent-workflows").getOrElse(DefaultMaxWorkflowsToRun)
-  private val maxWorkflowsToLaunch = config.getConfig("system").as[Option[Int]]("max-workflow-launch-count").getOrElse(DefaultMaxWorkflowsToLaunch)
-  private val newWorkflowPollRate = config.getConfig("system").as[Option[Int]]("new-workflow-poll-rate").getOrElse(DefaultNewWorkflowPollRate).seconds
+  private val maxWorkflowsRunning =
+    config.getConfig("system").as[Option[Int]]("max-concurrent-workflows").getOrElse(DefaultMaxWorkflowsToRun)
+  private val maxWorkflowsToLaunch =
+    config.getConfig("system").as[Option[Int]]("max-workflow-launch-count").getOrElse(DefaultMaxWorkflowsToLaunch)
+  private val newWorkflowPollRate =
+    config.getConfig("system").as[Option[Int]]("new-workflow-poll-rate").getOrElse(DefaultNewWorkflowPollRate).seconds
+  private val fileHashCacheEnabled = config.as[Option[Boolean]]("system.file-hash-cache").getOrElse(false)
 
   private val logger = Logging(context.system, this)
   private val tag = self.path.name
 
-  private var abortingWorkflowToReplyTo = Map.empty[WorkflowId, ActorRef]
-  private var shutdownHookThreadOption: Option[ShutdownHookThread] = None
-
   override def preStart(): Unit = {
-    addShutdownHook()
     // Starts the workflow polling cycle
-    self ! RetrieveNewWorkflows
+    timers.startSingleTimer(RetrieveNewWorkflowsKey, RetrieveNewWorkflows, Duration.Zero)
+    // Listen on subworkflow start events to inform our decision to pick up new root workflows from the workflow store.
+    context.system.eventStream.subscribe(self, classOf[SubWorkflowStart])
+    // Listen for workflows that have exceeded the metadata limit (CTM-467)
+    context.system.eventStream.subscribe(self, classOf[MaxMetadataAlert])
+    ()
   }
 
-  override def postStop() = {
-    // If the actor is stopping, especially during error tests, then there's nothing to wait for later at JVM shutdown.
-    tryRemoveShutdownHook()
-    super.postStop()
-  }
+  startWith(Running, WorkflowManagerData(workflows = Map.empty, subWorkflows = Set.empty))
 
-  private def addShutdownHook() = {
-    // Only abort jobs on SIGINT if the config explicitly sets system.abort-jobs-on-terminate = true.
-    val abortJobsOnTerminate =
-    config.getConfig("system").as[Option[Boolean]]("abort-jobs-on-terminate").getOrElse(params.abortJobsOnTerminate)
-
-    if (abortJobsOnTerminate) {
-      val shutdownHookThread = sys.addShutdownHook {
-        logger.info(s"$tag: Received shutdown signal.")
-        self ! AbortAllWorkflowsCommand
-        while (stateData != null && stateData.workflows.nonEmpty) {
-          log.info(s"Waiting for ${stateData.workflows.size} workflows to abort...")
-          Thread.sleep(1000)
-        }
-      }
-      shutdownHookThreadOption = Option(shutdownHookThread)
-    }
-  }
-
-  private def tryRemoveShutdownHook() = {
-    try {
-      shutdownHookThreadOption.foreach(_.remove())
-    } catch {
-      case _: IllegalStateException => /* ignore, we're probably shutting down */
-      case exception: Exception => log.error(exception, "Error while removing shutdown hook: {}", exception.getMessage)
-    }
-    shutdownHookThreadOption = None
-  }
-
-  startWith(Running, WorkflowManagerData(workflows = Map.empty))
-
-  when (Running) {
+  // Note: Despite the name, this StateFunction is used in BOTH the standard "Running" AND
+  // the special "RunningAndNotStartingNewWorkflows" states.
+  val runningAndNotStartingNewWorkflowsStateFunction: StateFunction = {
     /*
      Commands from clients
      */
-    case Event(RetrieveNewWorkflows, stateData) =>
+    case Event(RetrieveNewWorkflows, _) =>
       /*
         Cap the total number of workflows in flight, but also make sure we don't pull too many in at once.
-        Determine the number of available workflow slots and request the smaller of that number of maxWorkflowsToLaunch.
+        Determine the number of available workflow slots and request the smaller of that number and maxWorkflowsToLaunch.
        */
-      val maxNewWorkflows = maxWorkflowsToLaunch min (maxWorkflowsRunning - stateData.workflows.size)
-      params.workflowStore ! WorkflowStoreActor.FetchRunnableWorkflows(maxNewWorkflows)
+      params.jobExecutionTokenDispenserActor ! FetchLimitedGroups
+      stay()
+    case Event(ReplyLimitedGroups(groups), stateData) =>
+      val wfCount = stateData.workflows.size
+      val swfCount = stateData.subWorkflows.size
+      val maxNewWorkflows = maxWorkflowsToLaunch min (maxWorkflowsRunning - wfCount - swfCount)
+      val fetchCountLog =
+        s"Fetching $maxNewWorkflows new workflows ($wfCount workflows and $swfCount subworkflows in flight)"
+      if (groups.nonEmpty)
+        log.info(s"${fetchCountLog}, excluding groups: ${groups.mkString(", ")}")
+      else if (maxNewWorkflows < 1)
+        log.info(s"${fetchCountLog}, no groups excluded from workflow launch.")
+      else
+        log.debug(s"${fetchCountLog}, no groups excluded from workflow launch.")
+      params.workflowStore ! WorkflowStoreActor.FetchRunnableWorkflows(maxNewWorkflows, excludedGroups = groups)
       stay()
     case Event(WorkflowStoreEngineActor.NoNewWorkflowsToStart, _) =>
       log.debug("WorkflowStore provided no new workflows to start")
-      scheduleNextNewWorkflowPoll()
       stay()
     case Event(WorkflowStoreEngineActor.NewWorkflowsToStart(newWorkflows), stateData) =>
       val newSubmissions = newWorkflows map submitWorkflow
       log.info("Retrieved {} workflows from the WorkflowStoreActor", newSubmissions.toList.size)
-      scheduleNextNewWorkflowPoll()
       stay() using stateData.withAddition(newSubmissions)
     case Event(SubscribeToWorkflowCommand(id), data) =>
-      data.workflows.get(id) foreach {_ ! SubscribeTransitionCallBack(sender())}
+      data.workflows.get(id) foreach { _ ! SubscribeTransitionCallBack(sender()) }
       stay()
-    case Event(WorkflowManagerActor.AbortWorkflowCommand(id, replyTo), stateData) =>
-      val workflowActor = stateData.workflows.get(id)
-      workflowActor match {
-        case Some(actor) =>
-          actor ! WorkflowActor.AbortWorkflowCommand
-          abortingWorkflowToReplyTo += id -> replyTo
-          // Wait until the workflow transitions to the aborted state to respond with `WorkflowAborted`.
-          stay()
-        case None =>
-          // All cool, if we got this far the workflow ID was found in the workflow store so this workflow must have never
-          // made it to the workflow manager.
-          pushCurrentStateToMetadataService(id, WorkflowAborted)
-          replyTo ! WorkflowStoreEngineActor.WorkflowAborted(id)
-          stay()
-      }
     case Event(AbortAllWorkflowsCommand, data) if data.workflows.isEmpty =>
       goto(Done)
     case Event(AbortAllWorkflowsCommand, data) =>
-      log.info(s"$tag Aborting all workflows")
-      data.workflows.values.foreach { _ ! WorkflowActor.AbortWorkflowCommand }
+      log.info(s"$tag: Aborting all workflows")
+      data.workflows.values.foreach(_ ! WorkflowActor.AbortWorkflowCommand)
       goto(Aborting)
     /*
      Responses from services
      */
     case Event(WorkflowFailedResponse(workflowId, inState, reasons), _) =>
-      log.error(s"$tag Workflow $workflowId failed (during $inState): ${expandFailureReasons(reasons)}")
+      log.info(s"$tag: Workflow $workflowId failed (during $inState): ${expandFailureReasons(reasons)}")
       stay()
-    /*
-     Watched transitions
-     */
-    case Event(Transition(workflowActor, _, toState: WorkflowActorTerminalState), data) =>
-      log.info(s"$tag ${workflowActor.path.name} is in a terminal state: $toState")
+    case Event(WorkflowActorWorkComplete(id: WorkflowId, workflowActor: ActorRef, finalState: WorkflowState), data) =>
+      log.info(
+        s"$tag: Workflow actor for $id completed with status '$finalState'. The workflow will be removed from the workflow store."
+      )
       // This silently fails if idFromActor is None, but data.without call right below will as well
       data.idFromActor(workflowActor) foreach { workflowId =>
         params.jobStoreActor ! RegisterWorkflowCompleted(workflowId)
-        if (toState.workflowState == WorkflowAborted) {
-          val replyTo = abortingWorkflowToReplyTo(workflowId)
-          replyTo ! WorkflowStoreEngineActor.WorkflowAborted(workflowId)
-          abortingWorkflowToReplyTo -= workflowId
-        }
       }
-      stay using data.without(workflowActor)
+      stay() using data.without(workflowActor)
   }
 
-  when (Aborting) {
-    case Event(Transition(workflowActor, _, toState: WorkflowActorState), data) if toState.terminal =>
+  val scheduleNextNewWorkflowPollStateFunction: StateFunction = {
+    case event @ Event(WorkflowStoreEngineActor.NoNewWorkflowsToStart | _: WorkflowStoreEngineActor.NewWorkflowsToStart,
+                       _
+        ) =>
+      scheduleNextNewWorkflowPoll()
+      runningAndNotStartingNewWorkflowsStateFunction(event)
+  }
+
+  when(Running)(scheduleNextNewWorkflowPollStateFunction.orElse(runningAndNotStartingNewWorkflowsStateFunction))
+
+  when(RunningAndNotStartingNewWorkflows)(runningAndNotStartingNewWorkflowsStateFunction)
+
+  when(Aborting) {
+    case Event(Transition(workflowActor, _, _: WorkflowActorTerminalState), data) =>
       // Remove this terminal actor from the workflowStore and log a progress message.
       val updatedData = data.without(workflowActor)
       // If there are no more workflows to abort we're done, otherwise just stay in the current state.
       val resultAction = if (updatedData.workflows.isEmpty) {
-        logger.info(s"$tag All workflows are aborted")
+        logger.info(s"$tag: All workflows are aborted")
         goto(Done)
       } else {
-        logger.info(s"$tag Waiting for all workflows to abort (${updatedData.workflows.size} remaining).")
+        logger.info(s"$tag: Waiting for all workflows to abort (${updatedData.workflows.size} remaining).")
         stay()
       }
       // Whatever the result action, use the updated data:
@@ -246,11 +270,37 @@ class WorkflowManagerActor(params: WorkflowManagerActorParams)
     case Event(_, _) => stay()
   }
 
-  when (Done) { FSM.NullFunction }
+  when(Done)(FSM.NullFunction)
 
   whenUnhandled {
+    case Event(AbortWorkflowsCommand(ids), stateData) =>
+      for {
+        id <- ids
+        actor <- stateData.actorForId(id)
+      } yield actor ! WorkflowActor.AbortWorkflowCommand
+      stay()
+    case Event(MaxMetadataAlert(id, count, limit), stateData) =>
+      for {
+        actor <- stateData.actorForId(id)
+      } yield actor ! WorkflowActor.FailWorkflowWithExceptionCommand(
+        new Exception(s"Workflow $id produced $count metadata, exceeding limit of $limit.") with NoStackTrace
+      )
+      stay()
+    case Event(PreventNewWorkflowsFromStarting, _) =>
+      timers.cancel(RetrieveNewWorkflowsKey)
+      sender() ! akka.Done
+      goto(RunningAndNotStartingNewWorkflows)
+    case Event(SubWorkflowStart(actorRef), data) =>
+      // Watch for this subworkflow to expire to remove it from the Set of running subworkflows.
+      context.watch(actorRef)
+      stay() using data.copy(subWorkflows = data.subWorkflows + actorRef)
+    case Event(Terminated(actorRef), data) =>
+      // This is looking only for subworkflow actor terminations. If for some reason we see a termination for a
+      // different type of actor this should be a noop since the ActorRef element being removed from the set of
+      // subworkflows would not have been in the set in the first place.
+      stay() using data.copy(subWorkflows = data.subWorkflows - actorRef)
     // Uninteresting transition and current state notifications.
-    case Event((Transition(_, _, _) | CurrentState(_, _)), _) => stay()
+    case Event(Transition(_, _, _) | CurrentState(_, _), _) => stay()
     case Event(JobStoreWriteSuccess(_), _) => stay() // Snoozefest
     case Event(JobStoreWriteFailure(t), _) =>
       log.error("Error writing to JobStore from WorkflowManagerActor: {}", t)
@@ -258,21 +308,25 @@ class WorkflowManagerActor(params: WorkflowManagerActorParams)
       stay()
     case Event(EngineStatsCommand, data) =>
       val sndr = sender()
-      context.actorOf(EngineStatsActor.props(data.workflows.values.toList, sndr), s"EngineStatsActor-${sndr.hashCode()}")
+      context.actorOf(EngineStatsActor.props(data.workflows.values.toList, sndr),
+                      s"EngineStatsActor-${sndr.hashCode()}"
+      )
       stay()
     // Anything else certainly IS interesting:
     case Event(unhandled, _) =>
-      log.warning(s"$tag Unhandled message: $unhandled")
+      log.warning(s"$tag: Unhandled message: $unhandled in state ${stateName}")
       stay()
   }
 
   onTransition {
     case _ -> Done =>
-      logger.info(s"$tag All workflows finished")
-      ()
+      logger.info(s"$tag: All workflows finished")
+      context stop self
     case fromState -> toState =>
-      logger.debug(s"$tag transitioning from $fromState to $toState")
+      logger.debug(s"$tag: transitioning from $fromState to $toState")
   }
+
+  private val callCachingBlacklistManager = new CallCachingBlacklistManager(config, logger)
 
   /**
     * Submit the workflow and return an updated copy of the state data reflecting the addition of a
@@ -281,39 +335,66 @@ class WorkflowManagerActor(params: WorkflowManagerActorParams)
   private def submitWorkflow(workflow: workflowstore.WorkflowToStart): WorkflowIdToActorRef = {
     val workflowId = workflow.id
 
-    val startMode = if (workflow.state == WorkflowStoreState.Restartable) {
-      logger.info(s"$tag Restarting workflow UUID($workflowId)")
-      RestartExistingWorkflow
+    if (workflow.state.restarted) {
+      logger.info(s"$tag: Restarting workflow UUID($workflowId) in ${workflow.state.toString} state")
     } else {
-      logger.info(s"$tag Starting workflow UUID($workflowId)")
-      StartNewWorkflow
+      logger.info(s"$tag: Starting workflow UUID($workflowId)")
     }
 
-    val wfProps = WorkflowActor.props(workflowId, startMode, workflow.sources, config, params.ioActor, params.serviceRegistryActor,
-      params.workflowLogCopyRouter, params.jobStoreActor, params.subWorkflowStoreActor, params.callCacheReadActor, params.callCacheWriteActor,
-      params.dockerHashActor, params.jobTokenDispenserActor,
-      params.backendSingletonCollection, params.serverMode)
+    val fileHashCacheActorProps: Option[Props] =
+      fileHashCacheEnabled.option(RootWorkflowFileHashCacheActor.props(params.ioActor, workflowId))
+
+    val wfProps = WorkflowActor.props(
+      workflowToStart = workflow,
+      conf = config,
+      callCachingEnabled = callCachingEnabled,
+      invalidateBadCacheResults = invalidateBadCacheResults,
+      ioActor = params.ioActor,
+      serviceRegistryActor = params.serviceRegistryActor,
+      workflowLogCopyRouter = params.workflowLogCopyRouter,
+      workflowCallbackActor = params.workflowCallbackActor,
+      jobStoreActor = params.jobStoreActor,
+      subWorkflowStoreActor = params.subWorkflowStoreActor,
+      callCacheReadActor = params.callCacheReadActor,
+      callCacheWriteActor = params.callCacheWriteActor,
+      dockerHashActor = params.dockerHashActor,
+      jobRestartCheckTokenDispenserActor = params.jobRestartCheckTokenDispenserActor,
+      jobExecutionTokenDispenserActor = params.jobExecutionTokenDispenserActor,
+      workflowStoreActor = params.workflowStore,
+      backendSingletonCollection = params.backendSingletonCollection,
+      serverMode = params.serverMode,
+      workflowHeartbeatConfig = params.workflowHeartbeatConfig,
+      totalJobsByRootWf = new AtomicInteger(),
+      fileHashCacheActorProps = fileHashCacheActorProps,
+      blacklistCache = callCachingBlacklistManager.blacklistCacheFor(workflow),
+      groupMetricsActor = params.groupMetricsActor
+    )
     val wfActor = context.actorOf(wfProps, name = s"WorkflowActor-$workflowId")
 
     wfActor ! SubscribeTransitionCallBack(self)
     wfActor ! StartWorkflowCommand
-    logger.info(s"$tag Successfully started ${wfActor.path.name}")
+    logger.info(s"$tag: Successfully started ${wfActor.path.name}")
     WorkflowIdToActorRef(workflowId, wfActor)
   }
 
-  private def scheduleNextNewWorkflowPoll() = {
-    context.system.scheduler.scheduleOnce(newWorkflowPollRate, self, RetrieveNewWorkflows)(context.dispatcher)
-  }
+  private def scheduleNextNewWorkflowPoll() =
+    timers.startSingleTimer(RetrieveNewWorkflowsKey, RetrieveNewWorkflows, newWorkflowPollRate)
 
   private def expandFailureReasons(reasons: Seq[Throwable]): String = {
+
+    implicit val ec: ExecutionContext = context.dispatcher
 
     reasons map {
       case reason: ThrowableAggregation => expandFailureReasons(reason.throwables.toSeq)
       case reason: KnownJobFailureException =>
-        val stderrMessage = reason.stderrPath map { path => s"\nCheck the content of stderr for potential additional information: ${path.pathAsString}" } getOrElse ""
+        val stderrMessage = reason.stderrPath map { path =>
+          val content = Try(path.annotatedContentAsStringWithLimit(3000)).recover { case e =>
+            s"Could not retrieve content: ${e.getMessage}"
+          }.get
+          s"\nCheck the content of stderr for potential additional information: ${path.pathAsString}.\n $content"
+        } getOrElse ""
         reason.getMessage + stderrMessage
-      case reason =>
-        reason.getMessage + "\n" + ExceptionUtils.getStackTrace(reason)
+      case reason => ExceptionUtils.getStackTrace(reason)
     } mkString "\n"
   }
 }

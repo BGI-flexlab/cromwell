@@ -1,40 +1,54 @@
 package cromwell.engine.workflow.lifecycle.execution.callcaching
 
 import akka.testkit.{TestFSMRef, TestProbe}
-import cats.data.NonEmptyList
 import cromwell.core.TestKitSuite
-import cromwell.core.callcaching.{HashKey, HashResult, HashValue, HashingFailedMessage}
-import cromwell.engine.workflow.lifecycle.execution.callcaching.CallCacheHashingJobActor.{CompleteFileHashingResult, InitialHashingResult, NextBatchOfFileHashesRequest, NoFileHashesResult, PartialFileHashingResult}
+import cromwell.core.callcaching.{HashingFailedMessage, HashKey, HashResult, HashValue}
+import cromwell.engine.workflow.lifecycle.execution.callcaching.CallCacheHashingJobActor.{
+  CompleteFileHashingResult,
+  InitialHashingResult,
+  NextBatchOfFileHashesRequest,
+  NoFileHashesResult
+}
 import cromwell.engine.workflow.lifecycle.execution.callcaching.CallCacheReadActor._
-import cromwell.engine.workflow.lifecycle.execution.callcaching.CallCacheReadingJobActor.{CCRJAWithData, WaitingForCacheHitOrMiss, _}
+import cromwell.engine.workflow.lifecycle.execution.callcaching.CallCacheReadingJobActor.{
+  CCRJAWithData,
+  WaitingForCacheHitOrMiss,
+  _
+}
 import cromwell.engine.workflow.lifecycle.execution.callcaching.EngineJobHashingActor.{CacheHit, CacheMiss, HashError}
+import cromwell.services.CallCaching.CallCachingEntryId
 import org.scalatest.concurrent.Eventually
-import org.scalatest.{FlatSpecLike, Matchers}
+import org.scalatest.flatspec.AnyFlatSpecLike
+import org.scalatest.matchers.should.Matchers
 
-class CallCacheReadingJobActorSpec extends TestKitSuite with FlatSpecLike with Matchers with Eventually {
+class CallCacheReadingJobActorSpec extends TestKitSuite with AnyFlatSpecLike with Matchers with Eventually {
   behavior of "CallCacheReadingJobActor"
-  
+
   it should "try to match initial hashes against DB" in {
     val callCacheReadProbe = TestProbe()
-    val callCacheHasingActor = TestProbe()
-    val actorUnderTest = TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref))
+    val callCacheHashingActor = TestProbe()
+    val actorUnderTest =
+      TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref, prefixesHint = None, maxResultAgeDays = None))
     actorUnderTest.stateName shouldBe WaitingForInitialHash
 
     // The actual hashes don't matter here, we only care about the aggregated hash
     val aggregatedInitialhash: String = "AggregatedInitialHash"
-    callCacheHasingActor.send(actorUnderTest, InitialHashingResult(Set.empty, aggregatedInitialhash))
+    callCacheHashingActor.send(actorUnderTest, InitialHashingResult(Set.empty, aggregatedInitialhash))
     callCacheReadProbe.expectMsg(HasMatchingInitialHashLookup(aggregatedInitialhash))
     eventually {
       actorUnderTest.stateName shouldBe WaitingForHashCheck
-      actorUnderTest.stateData shouldBe CCRJAWithData(callCacheHasingActor.ref, aggregatedInitialhash, None, 1)
+      actorUnderTest.stateData shouldBe CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialhash, None, Set.empty)
     }
   }
 
   it should "ask for file hashes if it found matching entries for initial aggregated hash" in {
     val callCacheReadProbe = TestProbe()
     val callCacheHashingActor = TestProbe()
-    val actorUnderTest = TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref))
-    actorUnderTest.setState(WaitingForHashCheck, CCRJAWithData(callCacheHashingActor.ref, "AggregatedInitialHash", None, 1))
+    val actorUnderTest =
+      TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref, prefixesHint = None, maxResultAgeDays = None))
+    actorUnderTest.setState(WaitingForHashCheck,
+                            CCRJAWithData(callCacheHashingActor.ref, "AggregatedInitialHash", None, Set.empty)
+    )
 
     callCacheReadProbe.send(actorUnderTest, HasMatchingEntries)
     callCacheHashingActor.expectMsg(NextBatchOfFileHashesRequest)
@@ -47,69 +61,83 @@ class CallCacheReadingJobActorSpec extends TestKitSuite with FlatSpecLike with M
     val callCacheReadProbe = TestProbe()
     val callCacheHashingActor = TestProbe()
     val parent = TestProbe()
-    
-    val actorUnderTest = TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref), parent.ref)
+
+    val actorUnderTest =
+      TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref, prefixesHint = None, maxResultAgeDays = None),
+                 parent.ref
+      )
     parent.watch(actorUnderTest)
-    
-    actorUnderTest.setState(WaitingForHashCheck, CCRJAWithData(callCacheHashingActor.ref, "AggregatedInitialHash", None, 1))
+
+    actorUnderTest.setState(WaitingForHashCheck,
+                            CCRJAWithData(callCacheHashingActor.ref, "AggregatedInitialHash", None, Set.empty)
+    )
 
     callCacheReadProbe.send(actorUnderTest, NoMatchingEntries)
     parent.expectMsg(CacheMiss)
     parent.expectTerminated(actorUnderTest)
   }
 
-  it should "try to match partial file hashes against DB" in {
-    val callCacheReadProbe = TestProbe()
-    val callCacheHashingActor = TestProbe()
-    
-    val actorUnderTest = TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref), TestProbe().ref)
-
-    actorUnderTest.setState(WaitingForFileHashes)
-
-    val fileHashes = NonEmptyList.of(HashResult(HashKey("f1"), HashValue("h1")), HashResult(HashKey("f2"), HashValue("h2")))
-    callCacheHashingActor.send(actorUnderTest, PartialFileHashingResult(fileHashes))
-    callCacheReadProbe.expectMsg(HasMatchingInputFilesHashLookup(fileHashes))
-    
-    eventually {
-      actorUnderTest.stateName shouldBe WaitingForHashCheck
-    }
-  }
-
   it should "ask for matching cache entries for both aggregated hashes when got both" in {
     val callCacheReadProbe = TestProbe()
     val callCacheHashingActor = TestProbe()
-    
-    val actorUnderTest = TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref), TestProbe().ref)
+
+    val actorUnderTest =
+      TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref, prefixesHint = None, maxResultAgeDays = None),
+                 TestProbe().ref
+      )
 
     val aggregatedInitialHash: String = "AggregatedInitialHash"
     val aggregatedFileHash: String = "AggregatedFileHash"
-    actorUnderTest.setState(WaitingForFileHashes, CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, 1))
+    actorUnderTest.setState(WaitingForFileHashes,
+                            CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, Set.empty)
+    )
 
     val fileHashes = Set(HashResult(HashKey("f1"), HashValue("h1")), HashResult(HashKey("f2"), HashValue("h2")))
     callCacheHashingActor.send(actorUnderTest, CompleteFileHashingResult(fileHashes, aggregatedFileHash))
-    callCacheReadProbe.expectMsg(CacheLookupRequest(AggregatedCallHashes(aggregatedInitialHash, aggregatedFileHash), 1))
+    callCacheReadProbe.expectMsg(
+      CacheLookupRequest(AggregatedCallHashes(aggregatedInitialHash, aggregatedFileHash),
+                         Set.empty,
+                         prefixesHint = None,
+                         maxResultAgeDays = None
+      )
+    )
 
     eventually {
       actorUnderTest.stateName shouldBe WaitingForCacheHitOrMiss
-      actorUnderTest.stateData shouldBe CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, Some(aggregatedFileHash), 1)
+      actorUnderTest.stateData shouldBe CCRJAWithData(callCacheHashingActor.ref,
+                                                      aggregatedInitialHash,
+                                                      Some(aggregatedFileHash),
+                                                      Set.empty
+      )
     }
   }
 
   it should "ask for matching cache entries for initial hashes when there is no file input" in {
     val callCacheReadProbe = TestProbe()
     val callCacheHashingActor = TestProbe()
-    
-    val actorUnderTest = TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref), TestProbe().ref)
+
+    val actorUnderTest =
+      TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref, prefixesHint = None, maxResultAgeDays = None),
+                 TestProbe().ref
+      )
 
     val aggregatedInitialHash: String = "AggregatedInitialHash"
-    actorUnderTest.setState(WaitingForFileHashes, CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, 1))
+    actorUnderTest.setState(WaitingForFileHashes,
+                            CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, Set.empty)
+    )
 
     callCacheHashingActor.send(actorUnderTest, NoFileHashesResult)
-    callCacheReadProbe.expectMsg(CacheLookupRequest(AggregatedCallHashes(aggregatedInitialHash, None), 1))
+    callCacheReadProbe.expectMsg(
+      CacheLookupRequest(AggregatedCallHashes(aggregatedInitialHash, None),
+                         Set.empty,
+                         prefixesHint = None,
+                         maxResultAgeDays = None
+      )
+    )
 
     eventually {
       actorUnderTest.stateName shouldBe WaitingForCacheHitOrMiss
-      actorUnderTest.stateData shouldBe CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, 1)
+      actorUnderTest.stateData shouldBe CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, Set.empty)
     }
   }
 
@@ -117,11 +145,16 @@ class CallCacheReadingJobActorSpec extends TestKitSuite with FlatSpecLike with M
     val callCacheReadProbe = TestProbe()
     val callCacheHashingActor = TestProbe()
     val parent = TestProbe()
-    
-    val actorUnderTest = TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref), parent.ref)
+
+    val actorUnderTest =
+      TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref, prefixesHint = None, maxResultAgeDays = None),
+                 parent.ref
+      )
 
     val aggregatedInitialHash: String = "AggregatedInitialHash"
-    actorUnderTest.setState(WaitingForCacheHitOrMiss, CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, 1))
+    actorUnderTest.setState(WaitingForCacheHitOrMiss,
+                            CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, Set.empty)
+    )
 
     val id: CallCachingEntryId = CallCachingEntryId(8)
     callCacheReadProbe.send(actorUnderTest, CacheLookupNextHit(id))
@@ -129,7 +162,7 @@ class CallCacheReadingJobActorSpec extends TestKitSuite with FlatSpecLike with M
 
     eventually {
       actorUnderTest.stateName shouldBe WaitingForCacheHitOrMiss
-      actorUnderTest.stateData shouldBe CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, 2)
+      actorUnderTest.stateData shouldBe CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, Set(id))
     }
   }
 
@@ -137,12 +170,17 @@ class CallCacheReadingJobActorSpec extends TestKitSuite with FlatSpecLike with M
     val callCacheReadProbe = TestProbe()
     val callCacheHashingActor = TestProbe()
     val parent = TestProbe()
-    
-    val actorUnderTest = TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref), parent.ref)
+
+    val actorUnderTest =
+      TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref, prefixesHint = None, maxResultAgeDays = None),
+                 parent.ref
+      )
     parent.watch(actorUnderTest)
-    
+
     val aggregatedInitialHash: String = "AggregatedInitialHash"
-    actorUnderTest.setState(WaitingForCacheHitOrMiss, CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, 1))
+    actorUnderTest.setState(WaitingForCacheHitOrMiss,
+                            CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, Set.empty)
+    )
 
     callCacheReadProbe.send(actorUnderTest, CacheLookupNoHit)
     parent.expectMsg(CacheMiss)
@@ -153,14 +191,26 @@ class CallCacheReadingJobActorSpec extends TestKitSuite with FlatSpecLike with M
   it should "ask callCacheReadActor for next hit when requested (initial hash only)" in {
     val callCacheReadProbe = TestProbe()
     val callCacheHashingActor = TestProbe()
-    
-    val actorUnderTest = TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref), TestProbe().ref)
+
+    val actorUnderTest =
+      TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref, prefixesHint = None, maxResultAgeDays = None),
+                 TestProbe().ref
+      )
 
     val aggregatedInitialHash: String = "AggregatedInitialHash"
-    actorUnderTest.setState(WaitingForCacheHitOrMiss, CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, 2))
+    val seenCaches: Set[CallCachingEntryId] = Set(CallCachingEntryId(0))
+    actorUnderTest.setState(WaitingForCacheHitOrMiss,
+                            CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, seenCaches)
+    )
 
     actorUnderTest ! NextHit
-    callCacheReadProbe.expectMsg(CacheLookupRequest(AggregatedCallHashes(aggregatedInitialHash, None), 2))
+    callCacheReadProbe.expectMsg(
+      CacheLookupRequest(AggregatedCallHashes(aggregatedInitialHash, None),
+                         seenCaches,
+                         prefixesHint = None,
+                         maxResultAgeDays = None
+      )
+    )
 
     actorUnderTest.stateName shouldBe WaitingForCacheHitOrMiss
   }
@@ -168,15 +218,28 @@ class CallCacheReadingJobActorSpec extends TestKitSuite with FlatSpecLike with M
   it should "ask callCacheReadActor for next hit when requested (with file hash)" in {
     val callCacheReadProbe = TestProbe()
     val callCacheHashingActor = TestProbe()
-    
-    val actorUnderTest = TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref), TestProbe().ref)
+
+    val actorUnderTest =
+      TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref, prefixesHint = None, maxResultAgeDays = None),
+                 TestProbe().ref
+      )
 
     val aggregatedInitialHash: String = "AggregatedInitialHash"
     val aggregatedFileHash: String = "AggregatedFileHash"
-    actorUnderTest.setState(WaitingForCacheHitOrMiss, CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, Option(aggregatedFileHash), 2))
+    val seenCaches: Set[CallCachingEntryId] = Set(CallCachingEntryId(0))
+    actorUnderTest.setState(
+      WaitingForCacheHitOrMiss,
+      CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, Option(aggregatedFileHash), seenCaches)
+    )
 
     actorUnderTest ! NextHit
-    callCacheReadProbe.expectMsg(CacheLookupRequest(AggregatedCallHashes(aggregatedInitialHash, Option(aggregatedFileHash)), 2))
+    callCacheReadProbe.expectMsg(
+      CacheLookupRequest(AggregatedCallHashes(aggregatedInitialHash, Option(aggregatedFileHash)),
+                         seenCaches,
+                         prefixesHint = None,
+                         maxResultAgeDays = None
+      )
+    )
 
     actorUnderTest.stateName shouldBe WaitingForCacheHitOrMiss
   }
@@ -185,12 +248,17 @@ class CallCacheReadingJobActorSpec extends TestKitSuite with FlatSpecLike with M
     val callCacheReadProbe = TestProbe()
     val callCacheHashingActor = TestProbe()
     val parent = TestProbe()
-    
-    val actorUnderTest = TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref), parent.ref)
+
+    val actorUnderTest =
+      TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref, prefixesHint = None, maxResultAgeDays = None),
+                 parent.ref
+      )
     parent.watch(actorUnderTest)
 
     val aggregatedInitialHash: String = "AggregatedInitialHash"
-    actorUnderTest.setState(WaitingForCacheHitOrMiss, CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, 1))
+    actorUnderTest.setState(WaitingForCacheHitOrMiss,
+                            CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, Set.empty)
+    )
 
     callCacheHashingActor.send(actorUnderTest, HashingFailedMessage("file", new Exception("Hashing failed")))
     parent.expectMsg(CacheMiss)
@@ -202,12 +270,17 @@ class CallCacheReadingJobActorSpec extends TestKitSuite with FlatSpecLike with M
     val callCacheReadProbe = TestProbe()
     val callCacheHashingActor = TestProbe()
     val parent = TestProbe()
-    
-    val actorUnderTest = TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref), parent.ref)
+
+    val actorUnderTest =
+      TestFSMRef(new CallCacheReadingJobActor(callCacheReadProbe.ref, prefixesHint = None, maxResultAgeDays = None),
+                 parent.ref
+      )
     parent.watch(actorUnderTest)
 
     val aggregatedInitialHash: String = "AggregatedInitialHash"
-    actorUnderTest.setState(WaitingForCacheHitOrMiss, CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, 1))
+    actorUnderTest.setState(WaitingForCacheHitOrMiss,
+                            CCRJAWithData(callCacheHashingActor.ref, aggregatedInitialHash, None, Set.empty)
+    )
 
     val reason: Exception = new Exception("Lookup failed")
     callCacheHashingActor.send(actorUnderTest, CacheResultLookupFailure(reason))

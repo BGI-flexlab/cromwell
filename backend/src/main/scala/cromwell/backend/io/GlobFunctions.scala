@@ -1,50 +1,50 @@
 package cromwell.backend.io
 
+import cats.implicits._
+import common.validation.ErrorOr.ErrorOr
 import cromwell.backend.BackendJobDescriptor
 import cromwell.core.CallContext
-import wdl4s.TaskCall
-import wdl4s.expression.{NoFunctions, PureStandardLibraryFunctionsLike}
-import wdl4s.values._
+import cromwell.core.io.AsyncIoFunctions
+import wom.expression.{IoFunctionSet, IoFunctionSetAdapter}
+import wom.graph.CommandCallNode
+import wom.values._
 
-trait GlobFunctions extends PureStandardLibraryFunctionsLike {
+import scala.concurrent.Future
+
+trait GlobFunctions extends IoFunctionSet with AsyncIoFunctions {
+
+  private lazy val evaluateFileFunctions = new IoFunctionSetAdapter(this) with FileEvaluationIoFunctionSet
 
   def callContext: CallContext
 
-  def findGlobOutputs(call: TaskCall, jobDescriptor: BackendJobDescriptor): Set[WdlGlobFile] = {
-    val globOutputs = call.task.findOutputFiles(jobDescriptor.fullyQualifiedInputs, NoFunctions) collect {
-      case glob: WdlGlobFile => glob
+  def findGlobOutputs(call: CommandCallNode, jobDescriptor: BackendJobDescriptor): ErrorOr[List[WomGlobFile]] = {
+    def fromOutputs = call.callable.outputs.flatTraverse[ErrorOr, WomGlobFile] { outputDefinition =>
+      outputDefinition.expression.evaluateFiles(jobDescriptor.localInputs,
+                                                evaluateFileFunctions,
+                                                outputDefinition.womType
+      ) map {
+        _.toList.flatMap(_.file.flattenFiles) collect { case glob: WomGlobFile => glob }
+      }
     }
-
-    globOutputs.distinct.toSet
+    fromOutputs.map(_ ++ call.callable.additionalGlob)
   }
-
-  def globDirectory(glob: String): String = globName(glob) + "/"
-  def globName(glob: String) = s"glob-${glob.md5Sum}"
-
-  /**
-    * Returns a path to the glob.
-    *
-    * This path is usually passed back into the glob() method below.
-    *
-    * @param glob The glob. This is the same "pattern" passed to glob() below.
-    * @return The path.
-    */
-  override def globPath(glob: String): String = callContext.root.resolve(globDirectory(glob)).pathAsString
 
   /**
     * Returns a list of path from the glob.
     *
-    * The paths are currently read from a list file based on the pattern, and the path parameter is not used.
+    * The paths are read from a list file based on the pattern.
     *
-    * @param path    The path string returned by globPath. This isn't currently used.
     * @param pattern The pattern of the glob. This is the same "glob" passed to globPath().
     * @return The paths that match the pattern.
     */
-  override def glob(path: String, pattern: String): Seq[String] = {
-    val name = globName(pattern)
-    val listFile = callContext.root.resolve(s"$name.list").toRealPath()
-    listFile.lines.toSeq map { fileName =>
-      callContext.root.resolve(name).resolve(fileName).pathAsString
+  override def glob(pattern: String): Future[Seq[String]] = {
+    import GlobFunctions._
+    val globPatternName = globName(pattern)
+    val listFilePath = callContext.root.resolve(s"${globName(pattern)}.list")
+    asyncIo.readLinesAsync(listFilePath.getSymlinkSafePath()) map { lines =>
+      lines.toList map { fileName =>
+        (callContext.root / globPatternName / fileName).pathAsString
+      }
     }
   }
 }

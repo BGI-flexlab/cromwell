@@ -1,26 +1,54 @@
 package cromwell.engine.workflow.workflowstore
 
+import java.time.OffsetDateTime
+
 import cats.data.NonEmptyList
 import cromwell.core.{WorkflowId, WorkflowSourceFilesCollection}
-import cromwell.engine.workflow.workflowstore.WorkflowStoreState.StartableState
+import cromwell.engine.workflow.workflowstore.SqlWorkflowStore.WorkflowStoreAbortResponse.WorkflowStoreAbortResponse
+import cromwell.engine.workflow.workflowstore.SqlWorkflowStore.WorkflowStoreState.WorkflowStoreState
+import cromwell.engine.workflow.workflowstore.SqlWorkflowStore.WorkflowSubmissionResponse
 
+import scala.concurrent.duration.FiniteDuration
 import scala.concurrent.{ExecutionContext, Future}
 
 trait WorkflowStore {
 
   def initialize(implicit ec: ExecutionContext): Future[Unit]
 
+  def abortAllRunning()(implicit ec: ExecutionContext): Future[Unit]
+
+  /**
+    * Mark a workflow as aborting, unless the row is OnHold or Submitted, in which case the row is deleted.
+    */
+  def abort(id: WorkflowId)(implicit ec: ExecutionContext): Future[WorkflowStoreAbortResponse]
+
+  def findWorkflows(cromwellId: String)(implicit ec: ExecutionContext): Future[Iterable[WorkflowId]]
+
+  def findWorkflowsWithAbortRequested(cromwellId: String)(implicit ec: ExecutionContext): Future[Iterable[WorkflowId]]
+
+  def stats(implicit ec: ExecutionContext): Future[Map[WorkflowStoreState, Int]]
+
   /**
     * Adds the requested WorkflowSourceFiles to the store and returns a WorkflowId for each one (in order)
     * for tracking purposes.
     */
-  def add(sources: NonEmptyList[WorkflowSourceFilesCollection])(implicit ec: ExecutionContext): Future[NonEmptyList[WorkflowId]]
+  def add(sources: NonEmptyList[WorkflowSourceFilesCollection])(implicit
+    ec: ExecutionContext
+  ): Future[NonEmptyList[WorkflowSubmissionResponse]]
 
   /**
     * Retrieves up to n workflows which have not already been pulled into the engine and sets their pickedUp
     * flag to true
     */
-  def fetchRunnableWorkflows(n: Int, state: StartableState)(implicit ec: ExecutionContext): Future[List[WorkflowToStart]]
+  def fetchStartableWorkflows(n: Int, cromwellId: String, heartbeatTtl: FiniteDuration, excludedGroups: Set[String])(
+    implicit ec: ExecutionContext
+  ): Future[List[WorkflowToStart]]
 
-  def remove(id: WorkflowId)(implicit ec: ExecutionContext): Future[Boolean]
+  def writeWorkflowHeartbeats(workflowIds: Set[(WorkflowId, OffsetDateTime)], heartbeatDateTime: OffsetDateTime)(
+    implicit ec: ExecutionContext
+  ): Future[Int]
+
+  def switchOnHoldToSubmitted(id: WorkflowId)(implicit ec: ExecutionContext): Future[Unit]
+
+  def deleteFromStore(workflowId: WorkflowId)(implicit ec: ExecutionContext): Future[Int]
 }

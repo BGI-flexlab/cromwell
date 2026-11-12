@@ -1,63 +1,109 @@
 package cromwell.backend.io
 
+import common.util.StringUtil._
+import cromwell.backend.BackendJobDescriptorKey
 import cromwell.core.path.Path
-import cromwell.core.{CallContext, JobKey}
+import cromwell.core.{CallContext, JobKey, StandardPaths}
 import cromwell.services.metadata.CallMetadataKeys
 
 object JobPaths {
   val CallPrefix = "call"
   val ShardPrefix = "shard"
   val AttemptPrefix = "attempt"
+  val CacheCopyPrefix = "cacheCopy"
   val ScriptPathKey = "script"
   val StdoutPathKey = "stdout"
   val StdErrPathKey = "stderr"
   val ReturnCodePathKey = "returnCode"
   val CallRootPathKey = "callRootPath"
+  val DockerCidPathKey = "dockerCidPath"
 
-  def callPathBuilder(root: Path, jobKey: JobKey) = {
-    val callName = jobKey.scope.unqualifiedName
+  def callPathBuilder(root: Path, jobKey: JobKey, isCallCacheCopyAttempt: Boolean) = {
+    val callName = jobKey.node.localName
     val call = s"$CallPrefix-$callName"
     val shard = jobKey.index map { s => s"$ShardPrefix-$s" } getOrElse ""
-    val retry = if (jobKey.attempt > 1) s"$AttemptPrefix-${jobKey.attempt}" else ""
 
-    List(call, shard, retry).foldLeft(root)((path, dir) => path.resolve(dir))
+    val retryOrCallCache =
+      if (isCallCacheCopyAttempt) CacheCopyPrefix
+      else if (jobKey.attempt > 1) s"$AttemptPrefix-${jobKey.attempt}"
+      else ""
+
+    List(call, shard, retryOrCallCache).foldLeft(root)((path, dir) => path.resolve(dir))
   }
 }
 
 trait JobPaths {
   import JobPaths._
 
+  def forCallCacheCopyAttempts: JobPaths
+  val isCallCacheCopyAttempt: Boolean
+
   def workflowPaths: WorkflowPaths
   def returnCodeFilename: String = "rc"
-  def stdoutFilename: String = "stdout"
-  def stderrFilename: String = "stderr"
-  def scriptFilename: String = "script"
-  
-  def jobKey: JobKey
-  lazy val callRoot = callPathBuilder(workflowPaths.workflowRoot, jobKey)
-  lazy val callExecutionRoot = callRoot
-  lazy val stdout = callExecutionRoot.resolve(stdoutFilename)
-  lazy val stderr = callExecutionRoot.resolve(stderrFilename)
-  lazy val script = callExecutionRoot.resolve(scriptFilename)
-  lazy val returnCode = callExecutionRoot.resolve(returnCodeFilename)
+  def memoryRetryRCFilename: String = "memory_retry_rc"
+  def defaultStdoutFilename = "stdout"
+  def defaultStderrFilename = "stderr"
+  def isDocker: Boolean = false
 
-  private lazy val commonMetadataPaths: Map[String, Path] = Map(
-    CallMetadataKeys.CallRoot -> callRoot,
-    CallMetadataKeys.Stdout -> stdout,
-    CallMetadataKeys.Stderr -> stderr
+  // In this non-Docker version of `JobPaths` there is no distinction between host and container roots so this is
+  // just called 'rootWithSlash'.
+  private lazy val rootWithSlash = callExecutionRoot.pathAsString.ensureSlashed
+
+  def isInExecution(string: String): Boolean = string.startsWith(rootWithSlash)
+
+  /**
+    * Return a host path corresponding to the specified container path.
+    */
+  def hostPathFromContainerPath(string: String): Path =
+    // No container here, just return a Path of the absolute path to the file.
+    callExecutionRoot.resolve(string.stripPrefix(rootWithSlash))
+
+  def hostPathFromContainerInputs(string: String): Path =
+    // No container here, just return a Path of the absolute path to the file.
+    callExecutionRoot.resolve(string.stripPrefix(rootWithSlash))
+
+  def scriptFilename: String = "script"
+  def dockerCidFilename: String = "docker_cid"
+
+  def jobKey: BackendJobDescriptorKey
+  lazy val callRoot = callPathBuilder(workflowPaths.workflowRoot, jobKey, isCallCacheCopyAttempt)
+  lazy val callExecutionRoot = callRoot
+
+  // Use default stdout and stderr names by default. This StandardPaths `var` may be reassigned later to
+  // enable dynamic standard output and error file names for languages like CWL that support this feature.
+  var standardPaths: StandardPaths = StandardPaths(
+    output = callExecutionRoot.resolve(defaultStdoutFilename),
+    error = callExecutionRoot.resolve(defaultStderrFilename)
   )
 
-  private lazy val commonDetritusPaths: Map[String, Path] = Map(
+  lazy val script = callExecutionRoot.resolve(scriptFilename)
+  lazy val dockerCid = callExecutionRoot.resolve(dockerCidFilename)
+  lazy val returnCode = callExecutionRoot.resolve(returnCodeFilename)
+  lazy val memoryRetryRC = callExecutionRoot.resolve(memoryRetryRCFilename)
+
+  // This is a `def` because `standardPaths` is a `var` that may be reassigned during the calculation of
+  // standard output and error file names.
+  def standardOutputAndErrorPaths: Map[String, Path] = Map(
+    CallMetadataKeys.Stdout -> standardPaths.output,
+    CallMetadataKeys.Stderr -> standardPaths.error
+  )
+
+  private lazy val commonMetadataPaths: Map[String, Path] =
+    standardOutputAndErrorPaths + (CallMetadataKeys.CallRoot -> callRoot)
+
+  // This is a `def` because `standardPaths` is a `var` that may be reassigned during the calculation of
+  // standard output and error file names.
+  private def commonDetritusPaths: Map[String, Path] = Map(
     JobPaths.CallRootPathKey -> callRoot,
     JobPaths.ScriptPathKey -> script,
-    JobPaths.StdoutPathKey -> stdout,
-    JobPaths.StdErrPathKey -> stderr,
+    JobPaths.StdoutPathKey -> standardPaths.output,
+    JobPaths.StdErrPathKey -> standardPaths.error,
     JobPaths.ReturnCodePathKey -> returnCode
   )
 
   private lazy val commonLogPaths: Map[String, Path] = Map(
-    JobPaths.StdoutPathKey -> stdout,
-    JobPaths.StdErrPathKey -> stderr
+    JobPaths.StdoutPathKey -> standardPaths.output,
+    JobPaths.StdErrPathKey -> standardPaths.error
   )
 
   protected lazy val customMetadataPaths: Map[String, Path] = Map.empty
@@ -65,8 +111,8 @@ trait JobPaths {
   protected lazy val customLogPaths: Map[String, Path] = Map.empty
 
   lazy val metadataPaths = commonMetadataPaths ++ customMetadataPaths
-  lazy val detritusPaths = commonDetritusPaths ++ customDetritusPaths
+  def detritusPaths = commonDetritusPaths ++ customDetritusPaths
   lazy val logPaths = commonLogPaths ++ customLogPaths
 
-  lazy val callContext = CallContext(callExecutionRoot, stdout.pathAsString, stderr.pathAsString)
+  lazy val callContext = CallContext(callExecutionRoot, standardPaths, isDocker)
 }

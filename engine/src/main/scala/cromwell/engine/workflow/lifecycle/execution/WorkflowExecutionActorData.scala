@@ -1,136 +1,155 @@
 package cromwell.engine.workflow.lifecycle.execution
 
+import java.util.concurrent.atomic.AtomicInteger
+
 import akka.actor.ActorRef
 import cromwell.backend._
 import cromwell.core.ExecutionStatus._
-import cromwell.core._
-import cromwell.engine.workflow.lifecycle.execution.OutputStore.{OutputCallKey, OutputEntry}
-import cromwell.engine.workflow.lifecycle.execution.WorkflowExecutionActor.{DeclarationKey, SubWorkflowKey}
-import cromwell.engine.{EngineWorkflowDescriptor, WdlFunctions}
-import wdl4s.values.WdlValue
+import cromwell.core.io.AsyncIo
+import cromwell.core.{JobKey, _}
+import cromwell.engine.workflow.lifecycle.execution.WorkflowExecutionActorData.DataStoreUpdate
+import cromwell.engine.workflow.lifecycle.execution.keys._
+import cromwell.engine.workflow.lifecycle.execution.stores.ValueStore.ValueKey
+import cromwell.engine.workflow.lifecycle.execution.stores.{ExecutionStore, ValueStore}
+import cromwell.engine.{EngineIoFunctions, EngineWorkflowDescriptor}
+import wom.graph.GraphNodePort.OutputPort
+import wom.values.WomValue
+
+import scala.concurrent.ExecutionContext
 
 object WorkflowExecutionDiff {
   def empty = WorkflowExecutionDiff(Map.empty)
 }
+
 /** Data differential between current execution data, and updates performed in a method that needs to be merged. */
 final case class WorkflowExecutionDiff(executionStoreChanges: Map[JobKey, ExecutionStatus],
-                                       engineJobExecutionActorAdditions: Map[ActorRef, JobKey] = Map.empty) {
-  def containsNewEntry = executionStoreChanges.exists(esc => esc._2 == NotStarted)
+                                       jobKeyActorMappings: Map[ActorRef, JobKey] = Map.empty,
+                                       valueStoreAdditions: Map[ValueKey, WomValue] = Map.empty,
+                                       cumulativeOutputsChanges: Set[WomValue] = Set.empty,
+                                       rootAndSubworkflowIds: Set[WorkflowId] = Set.empty
+) {
+  def containsNewEntry: Boolean =
+    executionStoreChanges.exists(esc => esc._2 == NotStarted) || valueStoreAdditions.nonEmpty
 }
 
 object WorkflowExecutionActorData {
-  def empty(workflowDescriptor: EngineWorkflowDescriptor) = {
-    new WorkflowExecutionActorData(
+  def apply(workflowDescriptor: EngineWorkflowDescriptor,
+            ec: ExecutionContext,
+            asyncIo: AsyncIo,
+            totalJobsByRootWf: AtomicInteger,
+            executionStore: ExecutionStore
+  ): WorkflowExecutionActorData =
+    WorkflowExecutionActorData(
       workflowDescriptor,
-      ExecutionStore.empty,
-      Map.empty,
-      Map.empty,
-      Map.empty,
-      Map.empty,
-      OutputStore.empty
+      executionStore,
+      ValueStore.initialize(workflowDescriptor.knownValues),
+      asyncIo,
+      ec,
+      totalJobsByRootWf = totalJobsByRootWf,
+      rootAndSubworkflowIds = Set(workflowDescriptor.id)
     )
-  }
+
+  final case class DataStoreUpdate(runnableKeys: List[JobKey],
+                                   statusChanges: Map[JobKey, ExecutionStatus],
+                                   newData: WorkflowExecutionActorData
+  )
 }
 
 case class WorkflowExecutionActorData(workflowDescriptor: EngineWorkflowDescriptor,
                                       executionStore: ExecutionStore,
-                                      backendJobExecutionActors: Map[JobKey, ActorRef],
-                                      engineCallExecutionActors: Map[ActorRef, JobKey],
-                                      subWorkflowExecutionActors: Map[SubWorkflowKey, ActorRef],
-                                      downstreamExecutionMap: JobExecutionMap,
-                                      outputStore: OutputStore) {
+                                      valueStore: ValueStore,
+                                      asyncIo: AsyncIo,
+                                      ec: ExecutionContext,
+                                      jobKeyActorMappings: Map[ActorRef, JobKey] = Map.empty,
+                                      jobFailures: Map[JobKey, Throwable] = Map.empty,
+                                      downstreamExecutionMap: JobExecutionMap = Map.empty,
+                                      totalJobsByRootWf: AtomicInteger,
+                                      cumulativeOutputs: Set[WomValue] = Set.empty,
+                                      rootAndSubworkflowIds: Set[WorkflowId]
+) {
 
-  val expressionLanguageFunctions = new WdlFunctions(workflowDescriptor.pathBuilders)
+  val expressionLanguageFunctions = new EngineIoFunctions(workflowDescriptor.pathBuilders, asyncIo, ec)
 
-  def callExecutionSuccess(jobKey: JobKey, outputs: CallOutputs) = {
-    val (newJobExecutionActors, newSubWorkflowExecutionActors) = jobKey match {
-      case jobKey: BackendJobDescriptorKey => (backendJobExecutionActors - jobKey, subWorkflowExecutionActors)
-      case swKey: SubWorkflowKey => (backendJobExecutionActors, subWorkflowExecutionActors - swKey)
-      case _ => (backendJobExecutionActors, subWorkflowExecutionActors)
+  def sealExecutionStore: WorkflowExecutionActorData = this.copy(
+    executionStore = executionStore.seal
+  )
+
+  def callExecutionSuccess(jobKey: JobKey,
+                           outputs: CallOutputs,
+                           cumulativeOutputs: Set[WomValue],
+                           rootAndSubworkflowIds: Set[WorkflowId]
+  ): WorkflowExecutionActorData =
+    mergeExecutionDiff(
+      WorkflowExecutionDiff(
+        executionStoreChanges = Map(jobKey -> Done),
+        valueStoreAdditions = toValuesMap(jobKey, outputs),
+        cumulativeOutputsChanges = cumulativeOutputs ++ outputs.outputs.values,
+        rootAndSubworkflowIds = rootAndSubworkflowIds
+      )
+    )
+
+  final def expressionEvaluationSuccess(expressionKey: ExpressionKey,
+                                        values: Map[OutputPort, WomValue]
+  ): WorkflowExecutionActorData = {
+    val valueStoreAdditions = values.map { case (outputPort, value) =>
+      ValueKey(outputPort, expressionKey.index) -> value
     }
-
-    this.copy(
-      executionStore = executionStore.add(Map(jobKey -> Done)),
-      backendJobExecutionActors = newJobExecutionActors,
-      subWorkflowExecutionActors = newSubWorkflowExecutionActors,
-      outputStore = outputStore.add(updateSymbolStoreEntry(jobKey, outputs))
+    mergeExecutionDiff(
+      WorkflowExecutionDiff(
+        executionStoreChanges = Map(expressionKey -> Done),
+        valueStoreAdditions = valueStoreAdditions
+      )
     )
   }
 
-  def declarationEvaluationSuccess(declarationKey: DeclarationKey, value: WdlValue) = {
-    val outputStoreKey = OutputCallKey(declarationKey.scope, declarationKey.index)
-    val outputStoreValue = OutputEntry(declarationKey.scope.unqualifiedName, value.wdlType, Option(value))
-    this.copy(
-      executionStore = executionStore.add(Map(declarationKey -> Done)),
-      outputStore = outputStore.add(Map(outputStoreKey -> List(outputStoreValue)))
-    )
-  }
+  def executionFailure(failedJobKey: JobKey,
+                       reason: Throwable,
+                       jobExecutionMap: JobExecutionMap
+  ): WorkflowExecutionActorData =
+    mergeExecutionDiff(WorkflowExecutionDiff(executionStoreChanges = Map(failedJobKey -> ExecutionStatus.Failed)))
+      .addExecutions(jobExecutionMap)
+      .copy(
+        jobFailures = jobFailures + (failedJobKey -> reason)
+      )
 
-  def executionFailed(jobKey: JobKey) = mergeExecutionDiff(WorkflowExecutionDiff(Map(jobKey -> ExecutionStatus.Failed)))
+  def executionFailed(jobKey: JobKey): WorkflowExecutionActorData = mergeExecutionDiff(
+    WorkflowExecutionDiff(Map(jobKey -> ExecutionStatus.Failed))
+  )
 
-  /** Add the outputs for the specified `JobKey` to the symbol cache. */
-  private def updateSymbolStoreEntry(jobKey: JobKey, outputs: CallOutputs) = {
-    val newOutputEntries = outputs map {
-      case (name, value) => OutputEntry(name, value.wdlValue.wdlType, Option(value.wdlValue))
+  /** Converts call outputs to a ValueStore entries */
+  private def toValuesMap(jobKey: JobKey, outputs: CallOutputs): Map[ValueKey, WomValue] =
+    outputs.outputs.map { case (outputPort, jobOutput) =>
+      ValueKey(outputPort, jobKey.index) -> jobOutput
     }
 
-    Map(OutputCallKey(jobKey.scope, jobKey.index) -> newOutputEntries.toList)
-  }
-
-  /** Checks if the workflow is completed.
-    * If complete, this will return Some(finalStatus).  Otherwise, returns None */
-  def workflowCompletionStatus: Option[ExecutionStatus] = {
-    (executionStore.hasActiveJob, executionStore.hasFailedJob) match {
-      case (false, true) => Option(Failed)
-      case (false, false) => Option(Done)
-      case _ => None
-    }
-  }
-
-  def removeEngineJobExecutionActor(actorRef: ActorRef) = {
-    this.copy(engineCallExecutionActors = engineCallExecutionActors - actorRef)
-  }
-
-  def addCallExecutionActor(jobKey: JobKey, actor: Option[ActorRef]): WorkflowExecutionActorData = actor match {
-      case Some(actorRef) =>
-        jobKey match {
-          case jobKey: BackendJobDescriptorKey => this.copy(backendJobExecutionActors = backendJobExecutionActors + (jobKey -> actorRef))
-          case swKey: SubWorkflowKey => this.copy(subWorkflowExecutionActors = subWorkflowExecutionActors + (swKey -> actorRef))
-          case _ => this
-        }
-      case None => this
-  }
-
-  def removeCallExecutionActor(jobKey: JobKey): WorkflowExecutionActorData = {
-    jobKey match {
-      case jobKey: BackendJobDescriptorKey => this.copy(backendJobExecutionActors = backendJobExecutionActors - jobKey)
-      case swKey: SubWorkflowKey => this.copy(subWorkflowExecutionActors = subWorkflowExecutionActors - swKey)
-      case _ => this
-    }
-  }
-
-  def addExecutions(jobExecutionMap: JobExecutionMap): WorkflowExecutionActorData = {
+  def addExecutions(jobExecutionMap: JobExecutionMap): WorkflowExecutionActorData =
     this.copy(downstreamExecutionMap = downstreamExecutionMap ++ jobExecutionMap)
-  }
 
-  def mergeExecutionDiff(diff: WorkflowExecutionDiff): WorkflowExecutionActorData = {
+  def removeJobKeyActor(actorRef: ActorRef): WorkflowExecutionActorData =
     this.copy(
-      executionStore = executionStore.add(diff.executionStoreChanges),
-      engineCallExecutionActors = engineCallExecutionActors ++ diff.engineJobExecutionActorAdditions
+      jobKeyActorMappings = jobKeyActorMappings - actorRef
     )
+
+  def mergeExecutionDiff(diff: WorkflowExecutionDiff): WorkflowExecutionActorData =
+    this.copy(
+      executionStore = executionStore.updateKeys(diff.executionStoreChanges),
+      valueStore = valueStore.add(diff.valueStoreAdditions),
+      jobKeyActorMappings = jobKeyActorMappings ++ diff.jobKeyActorMappings,
+      cumulativeOutputs = cumulativeOutputs ++ diff.cumulativeOutputsChanges,
+      rootAndSubworkflowIds = rootAndSubworkflowIds ++ diff.rootAndSubworkflowIds
+    )
+
+  def mergeExecutionDiffs(diffs: Iterable[WorkflowExecutionDiff]): WorkflowExecutionActorData =
+    diffs.foldLeft(this)((newData, diff) => newData.mergeExecutionDiff(diff))
+
+  def jobExecutionMap: JobExecutionMap =
+    downstreamExecutionMap updated (workflowDescriptor.backendDescriptor, executionStore.startedJobs)
+
+  def executionStoreUpdate(maxSubWorkflowsToLaunch: Int): DataStoreUpdate = {
+    val update = executionStore.update(maxSubWorkflowsToLaunch)
+    DataStoreUpdate(update.runnableKeys, update.statusChanges, this.copy(executionStore = update.updatedStore))
   }
 
-  def mergeExecutionDiffs(diffs: Traversable[WorkflowExecutionDiff]): WorkflowExecutionActorData = {
-    diffs.foldLeft(this)((newData, diff) => newData.mergeExecutionDiff(diff))
-  }
-  
-  def resetCheckRunnable = this.copy(executionStore = executionStore.copy(hasNewRunnables = false))
-  
-  def hasNewRunnables = executionStore.hasNewRunnables
-  
-  def jobExecutionMap: JobExecutionMap = {
-    downstreamExecutionMap updated (workflowDescriptor.backendDescriptor, executionStore.startedJobs)
-  }
-  
-  def hasRunningActors = backendJobExecutionActors.nonEmpty || subWorkflowExecutionActors.nonEmpty
+  def done: Boolean = executionStore.isDone
+  def stalled: Boolean = executionStore.isStalled
 }

@@ -1,26 +1,64 @@
 package cromwell.docker
 
+import common.assertion.CromwellTimeoutSpec
+import org.scalatest.flatspec.AnyFlatSpec
+import org.scalatest.matchers.should.Matchers
 import org.scalatest.prop.TableDrivenPropertyChecks
-import org.scalatest.{FlatSpec, Matchers}
 
-class DockerImageIdentifierSpec extends FlatSpec with Matchers with TableDrivenPropertyChecks {
+class DockerImageIdentifierSpec
+    extends AnyFlatSpec
+    with CromwellTimeoutSpec
+    with Matchers
+    with TableDrivenPropertyChecks {
   behavior of "DockerImageID"
-  
+
   it should "parse valid docker images" in {
     val valid = Table(
-      ("sourceString",                            "host",             "repo",                 "image",     "reference"),
+      ("sourceString", "host", "repo", "image", "reference"),
       // Without tags -> latest
-      ("ubuntu",                                  None,               None,                   "ubuntu",     "latest"),
-      ("broad/cromwell",                          None,               Some("broad"),          "cromwell",   "latest"),
-      ("index.docker.io/ubuntu",         Option("index.docker.io"),   None,                   "ubuntu",     "latest"),
-      ("broad/cromwell/submarine",                None,               Some("broad/cromwell"), "submarine",  "latest"),
-      ("gcr.io/google/alpine",              Option("gcr.io"),         Some("google"),         "alpine",     "latest"),
+      ("ubuntu", None, None, "ubuntu", "latest"),
+      ("docker://ubuntu:latest", None, None, "ubuntu", "latest"),
+      ("broad/cromwell", None, Option("broad"), "cromwell", "latest"),
+      ("index.docker.io/ubuntu", Option("index.docker.io"), None, "ubuntu", "latest"),
+      ("broad/cromwell/submarine", None, Option("broad/cromwell"), "submarine", "latest"),
+      ("gcr.io/google/slim", Option("gcr.io"), Option("google"), "slim", "latest"),
+      ("us-central1-docker.pkg.dev/google/slim",
+       Option("us-central1-docker.pkg.dev"),
+       Option("google"),
+       "slim",
+       "latest"
+      ),
+      ("terrabatchdev.azurecr.io/postgres", Option("terrabatchdev.azurecr.io"), None, "postgres", "latest"),
       // With tags
-      ("ubuntu:latest",                           None,               None,                   "ubuntu",     "latest"),
-      ("ubuntu:1235-SNAP",                        None,               None,                   "ubuntu",     "1235-SNAP"),
-      ("ubuntu:V3.8-5_1",                         None,               None,                   "ubuntu",     "V3.8-5_1")
+      ("ubuntu:latest", None, None, "ubuntu", "latest"),
+      ("ubuntu:1235-SNAP", None, None, "ubuntu", "1235-SNAP"),
+      ("ubuntu:V3.8-5_1", None, None, "ubuntu", "V3.8-5_1"),
+      ("index.docker.io:9999/ubuntu:170904", Option("index.docker.io:9999"), None, "ubuntu", "170904"),
+      ("localhost:5000/capture/transwf:170904", Option("localhost:5000"), Option("capture"), "transwf", "170904"),
+      ("quay.io/biocontainers/platypus-variant:0.8.1.1--htslib1.5_0",
+       Option("quay.io"),
+       Option("biocontainers"),
+       "platypus-variant",
+       "0.8.1.1--htslib1.5_0"
+      ),
+      ("terrabatchdev.azurecr.io/postgres:latest", Option("terrabatchdev.azurecr.io"), None, "postgres", "latest"),
+      ("python:3", None, None, "python", "3"),
+      ("localhost:443/ubuntu", Option("localhost:443"), None, "ubuntu", "latest"),
+      // Very long tags with trailing spaces cause problems for the re engine
+      ("someuser/someimage:supercalifragilisticexpialidociouseventhoughthesoundofitissomethingquiteatrociousifyousayitloudenoughyoullalwayssoundprecocious ",
+       None,
+       Some("someuser"),
+       "someimage",
+       "supercalifragilisticexpialidociouseventhoughthesoundofitissomethingquiteatrociousifyousayitloudenoughyoullalwayssoundprecocious"
+      ),
+      ("952500931000.dkr.ecr.us-east-1.amazonaws.com/docker-hub/broadinstitute/cromwell",
+       Option("952500931000.dkr.ecr.us-east-1.amazonaws.com"),
+       Option("docker-hub/broadinstitute"),
+       "cromwell",
+       "latest"
+      )
     )
-    
+
     forAll(valid) { (dockerString, host, repo, image, reference) =>
       val imageId = DockerImageIdentifier.fromString(dockerString)
       imageId.isSuccess shouldBe true
@@ -64,7 +102,7 @@ class DockerImageIdentifierSpec extends FlatSpec with Matchers with TableDrivenP
       "not@sha256:digest:tag",
       "not:sha256:digest@tag"
     )
-    
+
     invalid foreach { image =>
       DockerImageIdentifier.fromString(image).isSuccess shouldBe false
     }

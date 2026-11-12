@@ -1,11 +1,9 @@
 package cromwell.backend.impl.tes
 
-import cromwell.backend.sfs.SharedFileSystemExpressionFunctions
 import cromwell.backend.standard.{StandardInitializationData, StandardValidatedRuntimeAttributesBuilder}
 
-case class TesBackendInitializationData
-(
+case class TesBackendInitializationData(
   override val workflowPaths: TesWorkflowPaths,
   override val runtimeAttributesBuilder: StandardValidatedRuntimeAttributesBuilder,
   tesConfiguration: TesConfiguration
-) extends StandardInitializationData(workflowPaths, runtimeAttributesBuilder, classOf[SharedFileSystemExpressionFunctions])
+) extends StandardInitializationData(workflowPaths, runtimeAttributesBuilder, classOf[TesExpressionFunctions])

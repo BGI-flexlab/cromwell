@@ -1,5 +1,7 @@
 package cromwell.backend.impl.sfs.config
 
+import wom.RuntimeAttributesKeys
+
 /**
   * A consolidated list of constants, a one-stop-shop for backend configuration to know what constants are floating
   * around.
@@ -12,19 +14,22 @@ object ConfigConstants {
   val SubmitConfig = "submit"
   val SubmitDockerConfig = "submit-docker"
   val KillConfig = "kill"
+  val KillDockerConfig = "kill-docker"
   val CheckAliveConfig = "check-alive"
+  val ExitCodeTimeoutConfig = "exit-code-timeout-seconds"
   val RuntimeAttributesConfig = "runtime-attributes"
+  val RuntimeAttributesCachingConfig = "runtime-attributes-for-caching"
   val JobIdRegexConfig = "job-id-regex"
   val RunInBackgroundConfig = "run-in-background"
 
   /*
   Runtime attributes that may be specified within the RuntimeAttributesConfig.
    */
-  val DockerRuntimeAttribute = "docker"
-  val CpuRuntimeAttribute = "cpu"
-  val MemoryRuntimeAttribute = "memory"
+  val MemoryRuntimeAttribute = RuntimeAttributesKeys.MemoryKey
   // See: MemoryDeclarationValidation
   val MemoryRuntimeAttributePrefix = "memory_"
+  val MemoryMinRuntimeAttributePrefix = "memoryMin_"
+  val MemoryMaxRuntimeAttributePrefix = "memoryMax_"
   val DiskRuntimeAttribute = "disk"
   val DiskRuntimeAttributePrefix = "disk_"
   /*
@@ -35,6 +40,7 @@ object ConfigConstants {
   val SubmitTask = "submit"
   val SubmitDockerTask = "submit_docker"
   val KillTask = "kill"
+  val KillDockerTask = "kill_docker"
   val CheckAliveTask = "check_alive"
 
   /*
@@ -44,8 +50,13 @@ object ConfigConstants {
   val JobNameInput = "job_name"
   val CwdInput = "cwd"
   val DockerCwdInput = "docker_cwd"
+  val DockerCidInput = "docker_cid"
+  val DockerScriptInput = "docker_script"
+  val DockerStdoutInput = "docker_out"
+  val DockerStderrInput = "docker_err"
   val StdoutInput = "out"
   val StderrInput = "err"
   val ScriptInput = "script"
   val JobIdInput = "job_id"
+  val JobShellInput = "job_shell"
 }

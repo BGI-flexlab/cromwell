@@ -1,0 +1,48 @@
+version: '2'
+services:
+  cromwell-test:
+    build:
+      context: cromwell-test
+    command: src/ci/bin/test.sh
+    environment:
+      - BUILD_NUMBER
+      - BUILD_URL
+      - CI
+      - CROMWELL_BUILD_CENTAUR_TYPE
+      - GIT_BRANCH
+      - JENKINS
+      - JENKINS_BUILD_TYPE
+      - CENTAUR_TEST_ADDITIONAL_PARAMETERS
+    working_dir: ${PWD}
+    volumes:
+      - ${HOME}:${HOME}
+    links:
+      - mysql-db
+      - mariadb-db
+      - postgresql-db
+  mysql-db:
+    image: "mysql:8.4"
+    environment:
+      - MYSQL_ROOT_PASSWORD=private
+      - MYSQL_USER=cromwell
+      - MYSQL_PASSWORD=test
+      - MYSQL_DATABASE=cromwell_test
+    volumes:
+      - ./mysql-conf.d:/etc/mysql/conf.d
+  mariadb-db:
+    image: "mariadb:10.3"
+    environment:
+      - MYSQL_ROOT_PASSWORD=private
+      - MYSQL_USER=cromwell
+      - MYSQL_PASSWORD=test
+      - MYSQL_DATABASE=cromwell_test
+    volumes:
+      - ./mariadb-conf.d:/etc/mysql/conf.d
+  postgresql-db:
+    image: "postgres:11.3"
+    environment:
+      - POSTGRES_USER=cromwell
+      - POSTGRES_PASSWORD=test
+      - POSTGRES_DB=cromwell_test
+    volumes:
+      - ./postgresql-initdb.d:/docker-entrypoint-initdb.d

@@ -2,12 +2,12 @@ package cromwell.database.migration.metadata.table.symbol
 
 import java.sql.{PreparedStatement, ResultSet}
 
-import cromwell.core.simpleton.WdlValueSimpleton._
+import cromwell.core.simpleton.WomValueSimpleton._
 import cromwell.database.migration.WdlTransformation
 import cromwell.database.migration.custom.BatchedTaskChange
-import wdl4s.WdlExpression
-import wdl4s.types.WdlType
-import wdl4s.values.WdlValue
+import wdl.draft2.model.WdlExpression
+import wdl.draft2.model.types.WdlFlavoredWomType
+import wom.values.WomValue
 
 import scala.util.{Failure, Success, Try}
 
@@ -25,16 +25,16 @@ trait SymbolTableMigration extends BatchedTaskChange {
   override val readCountQuery = SymbolTableMigration.NbRowsQuery
 
   override val readBatchQuery: String = """
-      |SELECT
-      |    WORKFLOW_EXECUTION_UUID,
-      |    SYMBOL_NAME,
-      |    SYMBOL_SCOPE,
-      |    SYMBOL_INDEX,
-      |    SYMBOL_ATTEMPT,
-      |    WDL_TYPE,
-      |    WDL_VALUE
-      |   FROM TMP_SYMBOL
-      |   WHERE TMP_SYMBOL_ID >= ? AND TMP_SYMBOL_ID < ?;
+                                          |SELECT
+                                          |    WORKFLOW_EXECUTION_UUID,
+                                          |    SYMBOL_NAME,
+                                          |    SYMBOL_SCOPE,
+                                          |    SYMBOL_INDEX,
+                                          |    SYMBOL_ATTEMPT,
+                                          |    WDL_TYPE,
+                                          |    WDL_VALUE
+                                          |   FROM TMP_SYMBOL
+                                          |   WHERE TMP_SYMBOL_ID >= ? AND TMP_SYMBOL_ID < ?;
     """.stripMargin
 
   override val migrateBatchQueries = List(MetadataStatement.InsertSql)
@@ -44,14 +44,14 @@ trait SymbolTableMigration extends BatchedTaskChange {
     */
   override def migrateBatchRow(row: ResultSet, statements: List[PreparedStatement]): Int = {
     val statement = statements.head
-    // Try to coerce the value to a WdlValue
+    // Try to coerce the value to a WomValue
     val value = for {
-      wdlType <- Try(WdlType.fromWdlString(row.getString("WDL_TYPE")))
+      womType <- Try(WdlFlavoredWomType.fromDisplayString(row.getString("WDL_TYPE")))
       inflated <- row.getString("WDL_VALUE") match {
         case null => Success("") // Empty Strings are null in the DB
-        case nonNull => inflate(row.getString("WDL_VALUE"))
+        case nonNull @ _ => inflate(row.getString("WDL_VALUE"))
       }
-    } yield WdlTransformation.coerceStringToWdl(inflated, wdlType)
+    } yield WdlTransformation.coerceStringToWdl(inflated, womType)
 
     val workflowUuid = row.getString("WORKFLOW_EXECUTION_UUID")
     val symbolName = row.getString("SYMBOL_NAME")
@@ -61,12 +61,14 @@ trait SymbolTableMigration extends BatchedTaskChange {
     val symbolAttempt = Option(row.getString("SYMBOL_ATTEMPT")) map { _.toInt }
 
     value match {
-      case Success(wdlValue) =>
-        processSymbol(statement, workflowUuid, symbolName, symbolScope, symbolIndex, symbolAttempt, wdlValue)
+      case Success(womValue) =>
+        processSymbol(statement, workflowUuid, symbolName, symbolScope, symbolIndex, symbolAttempt, womValue)
       case Failure(f) =>
         logger.error(
           s"""Could not parse symbol of type ${row.getString("WDL_TYPE")}
-              |for Workflow $workflowUuid - Call $symbolScope:$symbolIndex""".stripMargin, f)
+             |for Workflow $workflowUuid - Call $symbolScope:$symbolIndex""".stripMargin,
+          f
+        )
         0
     }
   }
@@ -77,14 +79,18 @@ trait SymbolTableMigration extends BatchedTaskChange {
                     symbolScope: String,
                     symbolIndex: Option[Int],
                     symbolAttempt: Option[Int],
-                    wdlValue: WdlValue): Int
+                    womValue: WomValue
+  ): Int
 
   /**
-    * Add all necessary statements to the batch for the provided WdlValue.
+    * Add all necessary statements to the batch for the provided WomValue.
     */
-  protected final def addWdlValue(metadataKey: String, wdlValue: WdlValue, metadataStatementForCall: MetadataStatement): Int = {
-    wdlValue match {
-        // simplify doesn't handle WdlExpression
+  final protected def addWdlValue(metadataKey: String,
+                                  womValue: WomValue,
+                                  metadataStatementForCall: MetadataStatement
+  ): Int =
+    womValue match {
+      // simplify doesn't handle WdlExpression
       case expr: WdlExpression =>
         metadataStatementForCall.addKeyValue(metadataKey, expr.valueString)
         1
@@ -95,5 +101,4 @@ trait SymbolTableMigration extends BatchedTaskChange {
         }
         simplified.size
     }
-  }
 }

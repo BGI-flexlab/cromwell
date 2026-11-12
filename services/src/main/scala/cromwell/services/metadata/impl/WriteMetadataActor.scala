@@ -1,84 +1,160 @@
 package cromwell.services.metadata.impl
 
-import akka.actor.{ActorLogging, LoggingFSM, Props}
+import akka.actor.{ActorLogging, ActorRef, Props}
+import cats.data.NonEmptyVector
 import cromwell.core.Dispatcher.ServiceDispatcher
-import cromwell.core.actor.BatchingDbWriter
-import cromwell.core.actor.BatchingDbWriter._
-import cromwell.services.SingletonServicesStore
-import cromwell.services.metadata.MetadataEvent
-import cromwell.services.metadata.MetadataService.{MetadataServiceAction, PutMetadataAction}
+import cromwell.core.Mailbox.PriorityMailbox
+import cromwell.core.WorkflowId
+import cromwell.core.events.{HeavyMetadataAlert, MaxMetadataAlert}
+import cromwell.core.instrumentation.InstrumentationPrefixes
+import cromwell.services.metadata.{MetadataEvent, MetadataString, MetadataValue}
+import cromwell.services.metadata.MetadataService._
+import cromwell.services.metadata.impl.MetadataStatisticsRecorder.MetadataStatisticsRecorderSettings
+import cromwell.services.{EnhancedBatchActor, MetadataServicesStore}
+import wdl.util.StringUtil
 
-import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 
-class WriteMetadataActor(batchSize: Int, flushRate: FiniteDuration)
-  extends LoggingFSM[BatchingDbWriterState, BatchingDbWriter.BatchingDbWriterData] with ActorLogging with
-  MetadataDatabaseAccess with SingletonServicesStore {
-  import WriteMetadataActor._
+class WriteMetadataActor(override val batchSize: Int,
+                         override val flushRate: FiniteDuration,
+                         override val serviceRegistryActor: ActorRef,
+                         override val threshold: Int,
+                         metadataStatisticsRecorderSettings: MetadataStatisticsRecorderSettings,
+                         metadataKeysToClean: List[String]
+) extends EnhancedBatchActor[MetadataWriteAction](flushRate, batchSize)
+    with ActorLogging
+    with MetadataDatabaseAccess
+    with MetadataServicesStore {
 
-  implicit val ec: ExecutionContext = context.dispatcher
+  private val statsRecorder = MetadataStatisticsRecorder(metadataStatisticsRecorderSettings)
 
-  override def preStart(): Unit = {
-    context.system.scheduler.schedule(0.seconds, flushRate, self, ScheduledFlushToDb)
-    super.preStart()
+  override def process(e: NonEmptyVector[MetadataWriteAction]) = instrumentedProcess {
+    val (cleanedMetadataWriteActions, allPutEvents, putWithResponse) = prepareMetadata(e)
+    val dbAction = addMetadataEvents(allPutEvents)
+
+    statsRecorder.processEventsAndGenerateAlerts(allPutEvents) foreach {
+      case a: HeavyMetadataAlert =>
+        log.warning(s"${a.workflowId} has logged a heavy amount of metadata (${a.count} rows)")
+      case a: MaxMetadataAlert =>
+        log.error(s"${a.workflowId} has logged too much metadata and will fail (${a.count} rows)")
+        context.system.eventStream.publish(a)
+    }
+
+    dbAction onComplete {
+      case Success(_) =>
+        putWithResponse foreach { case (ev, replyTo) => replyTo ! MetadataWriteSuccess(ev) }
+      case Failure(cause) =>
+        val (outOfTries, stillGood) = cleanedMetadataWriteActions.toVector.partition(_.maxAttempts <= 1)
+
+        handleOutOfTries(outOfTries, cause)
+        handleEventsToReconsider(stillGood)
+    }
+
+    dbAction.map(_ => allPutEvents.size)
   }
 
-  startWith(WaitingToWrite, NoData)
+  def prepareMetadata(
+    e: NonEmptyVector[MetadataWriteAction]
+  ): (NonEmptyVector[MetadataWriteAction], Iterable[MetadataEvent], List[(Iterable[MetadataEvent], ActorRef)]) = {
+    val cleanedMetadataWriteActions = if (metadataKeysToClean.isEmpty) e else sanitizeInputs(e)
+    val empty = (Vector.empty[MetadataEvent], List.empty[(Iterable[MetadataEvent], ActorRef)])
 
-  when(WaitingToWrite) {
-    case Event(PutMetadataAction(events), curData) =>
-      curData.addData(events) match {
-        case newData: HasData[_] if newData.length > batchSize => goto(WritingToDb) using newData
-        case newData => stay using newData
+    val (putWithoutResponse, putWithResponse) = cleanedMetadataWriteActions.foldLeft(empty) {
+      case ((putEvents, putAndRespondEvents), action: PutMetadataAction) =>
+        (putEvents ++ action.events, putAndRespondEvents)
+      case ((putEvents, putAndRespondEvents), action: PutMetadataActionAndRespond) =>
+        (putEvents, putAndRespondEvents :+ (action.events -> action.replyTo))
+    }
+    val allPutEvents: Iterable[MetadataEvent] = putWithoutResponse ++ putWithResponse.flatMap(_._1)
+    (cleanedMetadataWriteActions, allPutEvents, putWithResponse)
+  }
+
+  def sanitizeInputs(
+    metadataWriteActions: NonEmptyVector[MetadataWriteAction]
+  ): NonEmptyVector[MetadataWriteAction] =
+    metadataWriteActions.map { metadataWriteAction =>
+      val metadataEvents =
+        metadataWriteAction.events.map { event =>
+          event.value match {
+            case Some(eventVal) =>
+              if (eventVal.valueType == MetadataString && metadataKeysToClean.contains(event.key.key)) {
+                event.copy(value = Option(MetadataValue(StringUtil.cleanUtf8mb4(eventVal.value))))
+              } else {
+                event
+              }
+            case None => event
+          }
+        }
+      metadataWriteAction match {
+        case action: PutMetadataAction => action.copy(events = metadataEvents)
+        case actionAndResp: PutMetadataActionAndRespond => actionAndResp.copy(events = metadataEvents)
       }
-    case Event(ScheduledFlushToDb, curData) =>
-      log.debug("Initiating periodic metadata flush to DB")
-      goto(WritingToDb) using curData
-    case Event(CheckPendingWrites, NoData) =>
-      sender() ! NoPendingWrites
-      stay()
-    case Event(CheckPendingWrites, _: HasData[_]) =>
-      sender() ! HasPendingWrites
-      stay()
+    }
+
+  private def countActionsByWorkflow(writeActions: Vector[MetadataWriteAction]): Map[WorkflowId, Int] =
+    writeActions.flatMap(_.events).groupBy(_.key.workflowId).map { case (k, v) => k -> v.size }
+
+  private def enumerateWorkflowWriteFailures(writeActions: Vector[MetadataWriteAction]): String =
+    countActionsByWorkflow(writeActions).map { case (wfid, size) => s"$wfid: $size" }.mkString(", ")
+
+  private def handleOutOfTries(writeActions: Vector[MetadataWriteAction], reason: Throwable): Unit = if (
+    writeActions.nonEmpty
+  ) {
+    log.error(
+      reason,
+      "Metadata event writes have failed irretrievably for the following workflows. They will be lost: " + enumerateWorkflowWriteFailures(
+        writeActions
+      )
+    )
+
+    writeActions foreach {
+      case PutMetadataActionAndRespond(ev, replyTo, _) => replyTo ! MetadataWriteFailure(reason, ev)
+      case _: PutMetadataAction => () // We need to satisfy the exhaustive match but there's nothing special to do here
+    }
   }
 
-  when(WritingToDb) {
-    case Event(CheckPendingWrites, _) => 
-      sender() ! HasPendingWrites
-      stay()
-    case Event(ScheduledFlushToDb, curData) => stay using curData
-    case Event(PutMetadataAction(events), curData) => stay using curData.addData(events)
-    case Event(FlushBatchToDb, NoData) =>
-      log.debug("Attempted metadata flush to DB but had nothing to write")
-      goto(WaitingToWrite) using NoData
-    case Event(FlushBatchToDb, HasData(e)) =>
-      log.debug("Flushing {} metadata events to the DB", e.length)
-      // blech
-      val events = e.toVector.collect({ case e: MetadataEvent => e })
-      addMetadataEvents(events) onComplete {
-        case Success(_) => self ! DbWriteComplete
-        case Failure(regerts) =>
-          log.error(regerts, "Failed to properly flush metadata to database")
-          self ! DbWriteComplete
-      }
+  private def handleEventsToReconsider(writeActions: Vector[MetadataWriteAction]): Unit = if (writeActions.nonEmpty) {
+    log.warning(
+      "Metadata event writes have failed for the following workflows. They will be retried: " + enumerateWorkflowWriteFailures(
+        writeActions
+      )
+    )
 
-      stay using NoData
-    case Event(DbWriteComplete, curData) =>
-      log.debug("Flush of metadata events complete")
-      goto(WaitingToWrite) using curData
+    writeActions foreach {
+      case action: PutMetadataAction => self ! action.copy(maxAttempts = action.maxAttempts - 1)
+      case action: PutMetadataActionAndRespond => self ! action.copy(maxAttempts = action.maxAttempts - 1)
+    }
   }
 
-  onTransition {
-    case WaitingToWrite -> WritingToDb => self ! FlushBatchToDb
+  // EnhancedBatchActor overrides
+  override def receive = enhancedReceive.orElse(super.receive)
+  override protected def weightFunction(command: MetadataWriteAction) = command.size
+  override protected def instrumentationPath = MetadataServiceActor.MetadataInstrumentationPrefix
+  override protected def instrumentationPrefix = InstrumentationPrefixes.ServicesPrefix
+  def commandToData(snd: ActorRef): PartialFunction[Any, MetadataWriteAction] = { case command: MetadataWriteAction =>
+    command
   }
 }
 
 object WriteMetadataActor {
-  def props(batchSize: Int, flushRate: FiniteDuration): Props = Props(new WriteMetadataActor(batchSize, flushRate)).withDispatcher(ServiceDispatcher)
 
-  sealed trait WriteMetadataActorMessage
-  case object CheckPendingWrites extends WriteMetadataActorMessage with MetadataServiceAction
-  case object HasPendingWrites extends WriteMetadataActorMessage
-  case object NoPendingWrites extends WriteMetadataActorMessage
+  def props(dbBatchSize: Int,
+            flushRate: FiniteDuration,
+            serviceRegistryActor: ActorRef,
+            threshold: Int,
+            statisticsRecorderSettings: MetadataStatisticsRecorderSettings,
+            metadataKeysToClean: List[String]
+  ): Props =
+    Props(
+      new WriteMetadataActor(dbBatchSize,
+                             flushRate,
+                             serviceRegistryActor,
+                             threshold,
+                             statisticsRecorderSettings,
+                             metadataKeysToClean
+      )
+    )
+      .withDispatcher(ServiceDispatcher)
+      .withMailbox(PriorityMailbox)
 }

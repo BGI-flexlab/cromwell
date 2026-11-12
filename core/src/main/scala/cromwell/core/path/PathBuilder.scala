@@ -5,7 +5,29 @@ import scala.util.Try
 trait PathBuilder {
   def name: String
 
+  /**
+    * Builds a path from a string.
+    *
+    * @param pathAsString The path to build
+    * @param pathBuilders Nil, or other potential builders, for example internally map GCS to a pre-signed HTTPS url
+    * @return A Success(path) or a Failure(throwable)
+    */
+  def build(pathAsString: String, pathBuilders: List[PathBuilder]): Try[Path] = build(pathAsString)
+
+  /**
+    * Alternative, simpler method of building a Path from a String.
+    */
   def build(pathAsString: String): Try[Path]
+}
+
+/**
+  * Extension of PathBuilder that attempts to pre-resolve paths to a different Path type, for example pre-resolving a
+  * DrsPath to a GcsPath.
+  */
+trait PreResolvePathBuilder extends PathBuilder {
+  def build(pathAsString: String, pathBuilders: List[PathBuilder]): Try[Path]
+
+  final override def build(pathAsString: String): Try[Path] = build(pathAsString, Nil)
 }
 
 /**
@@ -18,13 +40,20 @@ trait PathBuilder {
   * @see [[cromwell.core.path.EvenBetterPathMethods]]
   */
 trait Path extends PathObjectMethods with NioPathMethods with BetterFileMethods with EvenBetterPathMethods {
+
+  /**
+   * A string key corresponding to the filesystem this Path is associated with, ex. gcs, drs, local etc.
+   * This should be the string used to identify the filesystem in Cromwell's config file.
+   */
+  val filesystemTypeKey: String
+
   /**
     * A reference to the underlying nioPath, used to create new java.nio.Path's that will then be sent to newPath
     * for wrapping.
     *
     * @return The internal nioPath.
     */
-  protected def nioPath: NioPath
+  def nioPath: NioPath
 
   /**
     * Wraps the nioPath in our container type.
@@ -110,11 +139,11 @@ trait Path extends PathObjectMethods with NioPathMethods with BetterFileMethods 
   def pathWithoutScheme: String
 
   // Used by various extension traits within this scala package
-  private[path] final def nioPathPrivate: NioPath = nioPath
+  final private[path] def nioPathPrivate: NioPath = nioPath
 
   // Used within BetterFileMethods
-  private[path] final def betterFile: better.files.File = nioPathPrivate
+  final private[path] def betterFile: better.files.File = nioPathPrivate
 
   // Some Path methods return null.
-  private[path] final def newPathOrNull(nioPath: NioPath) = Option(nioPath).map(newPath).orNull
+  final private[path] def newPathOrNull(nioPath: NioPath) = Option(nioPath).map(newPath).orNull
 }

@@ -1,0 +1,97 @@
+<configuration>
+
+    <!-- Enhanced thread and date reporting. -->
+    <conversionRule
+            conversionWord="et"
+            converterClass="cromwell.core.logging.EnhancedThreadConverter"
+    />
+    <conversionRule
+            conversionWord="ed"
+            converterClass="cromwell.core.logging.EnhancedDateConverter"
+    />
+
+    <!-- default properties for FILEROLLER need to be set upfront -->
+
+    <property name="FILEROLLER_DIR" value="${FILEROLLER_DIR:-/var/log/cromwell}" />
+    <property name="FILEROLLER_MAXHISTORY" value="${FILEROLLER_MAXHISTORY:-30}" />
+    <property name="FILEROLLER_NAME" value="${FILEROLLER_NAME:-cromwell.log}" />
+
+    <condition class="ch.qos.logback.core.boolex.ExpressionPropertyCondition">
+        <expression>propertyEquals("LOG_MODE", "STANDARD") || propertyEquals("LOG_MODE", "standard")</expression>
+    </condition>
+    <if>
+        <then>
+            <appender name="STANDARD_APPENDER" class="ch.qos.logback.core.ConsoleAppender">
+                <encoder>
+                    <pattern>%ed{"yyyy-MM-dd HH:mm:ss,SSS"} %et %-5level - %msg%n</pattern>
+                </encoder>
+            </appender>
+        </then>
+        <else>
+            <appender name="STANDARD_APPENDER" class="ch.qos.logback.core.helpers.NOPAppender" />
+        </else>
+    </if>
+
+    <condition class="ch.qos.logback.core.boolex.ExpressionPropertyCondition">
+        <expression>propertyEquals("LOG_MODE", "PRETTY") || propertyEquals("LOG_MODE", "pretty")</expression>
+    </condition>
+    <if>
+        <then>
+            <appender name="PRETTY_APPENDER" class="ch.qos.logback.core.ConsoleAppender">
+                <encoder class="ch.qos.logback.core.encoder.LayoutWrappingEncoder">
+                    <layout class="cromwell.logging.TerminalLayout" />
+                </encoder>
+            </appender>
+            <logger name="liquibase" level="WARN"/>
+        </then>
+        <else>
+            <appender name="PRETTY_APPENDER" class="ch.qos.logback.core.helpers.NOPAppender" />
+        </else>
+    </if>
+
+    <condition class="ch.qos.logback.core.boolex.ExpressionPropertyCondition">
+        <expression>propertyEquals("LOG_MODE", "FILEROLLER") || propertyEquals("LOG_MODE", "fileroller")</expression>
+    </condition>
+    <if>
+        <then>
+            <appender name="FILEROLLER_APPENDER" class="ch.qos.logback.core.rolling.RollingFileAppender">
+
+                <file>${FILEROLLER_DIR}/${FILEROLLER_NAME}</file>
+
+                <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+
+                    <fileNamePattern>${FILEROLLER_DIR}/${FILEROLLER_NAMEPATTERN:-%d{yyyyMMdd}}-${FILEROLLER_NAME}</fileNamePattern>
+
+                    <maxHistory>${FILEROLLER_MAXHISTORY}</maxHistory>
+
+                    <totalSizeCap>${FILEROLLER_SIZECAP:-0}</totalSizeCap>
+
+                </rollingPolicy>
+                <encoder>
+                    <pattern>%ed{"yyyy-MM-dd HH:mm:ss,SSS"} [%et] %-5level %logger{35} - %msg%n</pattern>
+                </encoder>
+            </appender>
+        </then>
+        <else>
+            <appender name="FILEROLLER_APPENDER" class="ch.qos.logback.core.helpers.NOPAppender" />
+        </else>
+    </if>
+
+    <!-- Configure the Sentry appender, overriding the logging threshold to the WARN level -->
+    <appender name="Sentry" class="io.sentry.logback.SentryAppender">
+        <filter class="ch.qos.logback.classic.filter.ThresholdFilter">
+            <level>WARN</level>
+        </filter>
+    </appender>
+
+    <root level="${LOG_LEVEL}">
+        <appender-ref ref="STANDARD_APPENDER" />
+        <appender-ref ref="PRETTY_APPENDER" />
+        <appender-ref ref="FILEROLLER_APPENDER" />
+        <appender-ref ref="Sentry" />
+    </root>
+
+    <logger name="com.zaxxer.hikari" level="ERROR"/>
+    <logger name="HikariPool" level="ERROR"/>
+    <logger name="com.google.cloud.hadoop.gcsio.GoogleCloudStorageReadChannel" level="ERROR"/>
+</configuration>

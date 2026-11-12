@@ -1,15 +1,31 @@
 package cromwell.engine.workflow.workflowstore
 
-import cromwell.core.{WorkflowId, WorkflowSourceFilesCollection}
-import cromwell.engine.workflow.workflowstore.WorkflowStoreState.StartableState
+import java.time.OffsetDateTime
 
-sealed trait WorkflowStoreState {def isStartable: Boolean}
+import cromwell.core.{HasWorkflowIdAndSources, HogGroup, WorkflowId, WorkflowSourceFilesCollection}
 
-object WorkflowStoreState {
-  case object Running extends WorkflowStoreState { override def isStartable = false }
-  sealed trait StartableState extends WorkflowStoreState { override def isStartable = true }
-  case object Submitted extends StartableState
-  case object Restartable extends StartableState
+/**
+  * States of a workflow for which it can be fetched from the workflow store and started.
+  */
+sealed trait StartableState {
+  def restarted: Boolean
 }
 
-final case class WorkflowToStart(id: WorkflowId, sources: WorkflowSourceFilesCollection, state: StartableState)
+case object Submitted extends StartableState {
+  override val restarted = false
+}
+
+case object RestartableRunning extends StartableState {
+  override val restarted = true
+}
+
+case object RestartableAborting extends StartableState {
+  override val restarted = true
+}
+
+final case class WorkflowToStart(id: WorkflowId,
+                                 submissionTime: OffsetDateTime,
+                                 sources: WorkflowSourceFilesCollection,
+                                 state: StartableState,
+                                 hogGroup: HogGroup
+) extends HasWorkflowIdAndSources

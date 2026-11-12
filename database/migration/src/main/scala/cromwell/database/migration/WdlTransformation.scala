@@ -6,24 +6,26 @@ import java.util.zip.GZIPInputStream
 
 import org.apache.commons.codec.binary.Base64
 import org.apache.commons.io.IOUtils
-import wdl4s.types.{WdlPrimitiveType, WdlType}
+import wdl.draft2.model.types.WdlFlavoredWomType._
+import wom.types.{WomPrimitiveType, WomType}
 
 import scala.util.Try
 
-private [migration] object WdlTransformation {
+private[migration] object WdlTransformation {
 
   def inflate(value: String): Try[String] = Try {
     Option(value) match {
-      case Some(v) => IOUtils.toString(new GZIPInputStream(new ByteArrayInputStream(Base64.decodeBase64(v))), Charset.defaultCharset)
+      case Some(v) =>
+        IOUtils.toString(new GZIPInputStream(new ByteArrayInputStream(Base64.decodeBase64(v))), Charset.defaultCharset)
       case None => null
     }
-  } recover {
-    case e: IOException => value
+  } recover { case _: IOException =>
+    value
   }
 
-  def coerceStringToWdl(wdlString: String, wdlType: WdlType) = wdlType match {
+  def coerceStringToWdl(wdlString: String, womType: WomType) = womType match {
     case _ if wdlString == null => null
-    case p: WdlPrimitiveType => p.coerceRawValue(wdlString).get
-    case o => o.fromWdlString(wdlString)
+    case p: WomPrimitiveType => p.coerceRawValue(wdlString).get
+    case o => o.fromWorkflowSource(wdlString)
   }
 }

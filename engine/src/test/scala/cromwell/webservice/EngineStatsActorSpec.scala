@@ -5,15 +5,16 @@ import akka.testkit.{TestActorRef, TestProbe}
 import cromwell.core.TestKitSuite
 import cromwell.webservice.EngineStatsActor.{EngineStats, JobCount, JobCountQuery}
 import cromwell.webservice.EngineStatsActorSpec.FakeWorkflowActor
-import org.scalatest.{FlatSpecLike, Matchers}
+import org.scalatest.flatspec.AnyFlatSpecLike
+import org.scalatest.matchers.should.Matchers
 
 import scala.concurrent.duration._
 import scala.language.postfixOps
 
-class EngineStatsActorSpec extends TestKitSuite("EngineStatsActor") with FlatSpecLike with Matchers {
+class EngineStatsActorSpec extends TestKitSuite with AnyFlatSpecLike with Matchers {
   behavior of "EngineStatsActor"
 
-  val replyTo = TestProbe()
+  val replyTo = TestProbe("replyTo")
   val defaultTimeout = 500 millis
 
   it should "return double zeros with no WorkflowActors" in {
@@ -36,7 +37,7 @@ class EngineStatsActorSpec extends TestKitSuite("EngineStatsActor") with FlatSpe
   it should "return in a timely manner if one of the WorkflowActors is quiet" in {
     val workflowActors = List(Props(FakeWorkflowActor(0)), Props.empty) map { TestActorRef(_) }
     TestActorRef(EngineStatsActor.props(workflowActors, replyTo.ref, 50 millis))
-    replyTo.expectMsg(defaultTimeout, EngineStats(1, 0))
+    replyTo.expectMsg(defaultTimeout, EngineStats(2, 0))
   }
 
   it should "return the summation of jobs for all WorkflowActors" in {
@@ -48,8 +49,8 @@ class EngineStatsActorSpec extends TestKitSuite("EngineStatsActor") with FlatSpe
 
 object EngineStatsActorSpec {
   final case class FakeWorkflowActor(jobs: Int) extends Actor {
-    override def receive = {
-      case JobCountQuery => sender ! JobCount(jobs)
+    override def receive = { case JobCountQuery =>
+      sender() ! JobCount(jobs)
     }
   }
 }

@@ -1,53 +1,89 @@
 package cromwell.engine.workflow.lifecycle.execution.callcaching
 
+import _root_.wdl.draft2.model.command.StringCommandPart
 import akka.actor.{ActorRef, Props}
 import akka.testkit.{TestFSMRef, TestProbe}
 import cats.data.NonEmptyList
+import cats.syntax.validated._
+import common.mock.MockSugar
 import cromwell.backend._
 import cromwell.backend.standard.callcaching.StandardFileHashingActor.{FileHashResponse, SingleFileHashRequest}
+import cromwell.core.TestKitSuite
 import cromwell.core.callcaching.{HashingFailedMessage, _}
-import cromwell.core.{LocallyQualifiedName, TestKitSuite}
-import cromwell.engine.workflow.lifecycle.execution.callcaching.CallCacheHashingJobActor.{CCHJAFileHashResponse, CallCacheHashingJobActorData, CompleteFileHashingResult, HashingFiles, InitialHashingResult, NextBatchOfFileHashesRequest, NoFileHashesResult, PartialFileHashingResult, WaitingForHashFileRequest}
+import cromwell.engine.workflow.lifecycle.execution.callcaching.CallCacheHashingJobActor.{
+  CallCacheHashingJobActorData,
+  CCHJAFileHashResponse,
+  CompleteFileHashingResult,
+  HashingFiles,
+  InitialHashingResult,
+  NextBatchOfFileHashesRequest,
+  NoFileHashesResult,
+  PartialFileHashingResult,
+  WaitingForHashFileRequest
+}
 import cromwell.engine.workflow.lifecycle.execution.callcaching.EngineJobHashingActor.CacheMiss
-import org.mockito.Mockito._
+import cromwell.util.WomMocks
+import org.scalatest.Assertion
 import org.scalatest.concurrent.Eventually
+import org.scalatest.flatspec.AnyFlatSpecLike
+import org.scalatest.matchers.should.Matchers
 import org.scalatest.prop.TableDrivenPropertyChecks
-import org.scalatest.{FlatSpecLike, Matchers}
-import wdl4s.values.{WdlFile, WdlInteger, WdlString, WdlValue}
-import wdl4s.{Task, TaskCall}
+import wom.core.LocallyQualifiedName
+import wom.graph.WomIdentifier
+import wom.values.{WomInteger, WomSingleFile, WomString, WomValue}
 
-class CallCacheHashingJobActorSpec extends TestKitSuite with FlatSpecLike with BackendSpec with Matchers with Eventually with TableDrivenPropertyChecks {
+import scala.util.control.NoStackTrace
+
+class CallCacheHashingJobActorSpec
+    extends TestKitSuite
+    with AnyFlatSpecLike
+    with BackendSpec
+    with Matchers
+    with Eventually
+    with TableDrivenPropertyChecks
+    with MockSugar {
   behavior of "CallCacheReadingJobActor"
 
-  def templateJobDescriptor(inputs: Map[LocallyQualifiedName, WdlValue] = Map.empty) = {
-    val task = mock[Task]
-    val call = mock[TaskCall]
-    when(task.commandTemplateString).thenReturn("Do the stuff... now!!")
-    when(task.outputs).thenReturn(List.empty)
-    when(call.task).thenReturn(task)
+  def templateJobDescriptor(inputs: Map[LocallyQualifiedName, WomValue] = Map.empty): BackendJobDescriptor = {
+    val task = WomMocks
+      .mockTaskDefinition("task")
+      .copy(commandTemplateBuilder = Function.const(List(StringCommandPart("Do the stuff... now!!")).validNel))
+    val call = WomMocks.mockTaskCall(WomIdentifier("call"), definition = task)
     val workflowDescriptor = mock[BackendWorkflowDescriptor]
     val runtimeAttributes = Map(
-      "cpu" -> WdlInteger(1),
-      "memory" -> WdlString("3 GB"),
-      "continueOnReturnCode" -> WdlInteger(0),
-      "docker" -> WdlString("ubuntu:latest")
+      "cpu" -> WomInteger(1),
+      "memory" -> WomString("3 GB"),
+      "continueOnReturnCode" -> WomInteger(0),
+      "docker" -> WomString("ubuntu:latest")
     )
-    val jobDescriptor = BackendJobDescriptor(workflowDescriptor, BackendJobDescriptorKey(call, None, 1), runtimeAttributes, fqnMapToDeclarationMap(inputs), NoDocker, Map.empty)
+    val jobDescriptor = BackendJobDescriptor(workflowDescriptor,
+                                             BackendJobDescriptorKey(call, None, 1),
+                                             runtimeAttributes,
+                                             fqnWdlMapToDeclarationMap(inputs),
+                                             NoDocker,
+                                             None,
+                                             Map.empty
+    )
     jobDescriptor
   }
 
   it should "die immediately if created without cache read actor and write to cache turned off" in {
     val parent = TestProbe()
-    val testActor = TestFSMRef(new CallCacheHashingJobActor(
-      templateJobDescriptor(),
-      None,
-      None,
-      Set.empty,
-      "backedName",
-      Props.empty,
-      false,
-      DockerWithHash("ubuntu@sha256:blablablba")
-    ), parent.ref)
+    val testActor = TestFSMRef(
+      new CallCacheHashingJobActor(
+        templateJobDescriptor(),
+        None,
+        None,
+        Set.empty,
+        "backedName",
+        Props.empty,
+        DockerWithHash("ubuntu@sha256:blablablba"),
+        CallCachingActivity(readWriteMode = ReadCache),
+        callCachePathPrefixes = None,
+        fileHashBatchSize = 100
+      ),
+      parent.ref
+    )
     watch(testActor)
     expectTerminated(testActor)
     parent.expectMsgClass(classOf[InitialHashingResult])
@@ -57,8 +93,8 @@ class CallCacheHashingJobActorSpec extends TestKitSuite with FlatSpecLike with B
   it should "send a correct InitialHashingResult upon starting" in {
     val parent = TestProbe()
     val inputs = Map(
-      "stringInput" -> WdlString("hello"),
-      "fileInput" -> WdlFile("world")
+      "stringInput" -> WomString("hello"),
+      "fileInput" -> WomSingleFile("world")
     )
     // Do not include "memory" on purpose, even though it's in the map of runtime attributes.
     // This way we can verify that only attributes with a RuntimeAttributeDefinition are used for hashing
@@ -67,22 +103,27 @@ class CallCacheHashingJobActorSpec extends TestKitSuite with FlatSpecLike with B
     val runtimeAttributeDefinitions = Set(
       RuntimeAttributeDefinition("docker", None, usedInCallCaching = true),
       RuntimeAttributeDefinition("failOnStderr", None, usedInCallCaching = true),
-      RuntimeAttributeDefinition("continueOnReturnCode", Option(WdlInteger(0)), usedInCallCaching = true),
+      RuntimeAttributeDefinition("continueOnReturnCode", Option(WomInteger(0)), usedInCallCaching = true),
       RuntimeAttributeDefinition("cpu", None, usedInCallCaching = false)
     )
     val callCacheRead = TestProbe()
     val jobDescriptor: BackendJobDescriptor = templateJobDescriptor(inputs)
-    val actorUnderTest = TestFSMRef(new CallCacheHashingJobActor(
-      jobDescriptor,
-      Option(callCacheRead.ref),
-      None,
-      runtimeAttributeDefinitions,
-      "backedName",
-      Props.empty,
-      true,
-      DockerWithHash("ubuntu@sha256:blablablba")
-    ), parent.ref)
-    
+    val actorUnderTest = TestFSMRef(
+      new CallCacheHashingJobActor(
+        jobDescriptor,
+        Option(callCacheRead.ref),
+        None,
+        runtimeAttributeDefinitions,
+        "backedName",
+        Props.empty,
+        DockerWithHash("ubuntu@sha256:blablablba"),
+        CallCachingActivity(readWriteMode = ReadAndWriteCache),
+        callCachePathPrefixes = None,
+        fileHashBatchSize = 100
+      ),
+      parent.ref
+    )
+
     val expectedInitialHashes = Set(
       // md5 of Do the stuff... now
       HashResult(HashKey("command template"), HashValue("2259B15D9120F50C1BD4B2A3E2CE5A0E")),
@@ -94,7 +135,9 @@ class CallCacheHashingJobActorSpec extends TestKitSuite with FlatSpecLike with B
       HashResult(HashKey("output count"), HashValue("CFCD208495D565EF66E7DFF9F98764DA")),
       HashResult(HashKey("runtime attribute", "failOnStderr"), HashValue("N/A")),
       // md5 of 1
-      HashResult(HashKey(checkForHitOrMiss = false, "runtime attribute", "cpu"), HashValue("C4CA4238A0B923820DCC509A6F75849B")),
+      HashResult(HashKey(checkForHitOrMiss = false, "runtime attribute", "cpu"),
+                 HashValue("C4CA4238A0B923820DCC509A6F75849B")
+      ),
       // md5 of 0
       HashResult(HashKey("runtime attribute", "continueOnReturnCode"), HashValue("CFCD208495D565EF66E7DFF9F98764DA")),
       // md5 of "hello" (with quotes)
@@ -108,44 +151,54 @@ class CallCacheHashingJobActorSpec extends TestKitSuite with FlatSpecLike with B
     callCacheRead.expectMsg(expectedInitialHashResult)
     actorUnderTest.stateName shouldBe WaitingForHashFileRequest
     actorUnderTest.stateData shouldBe CallCacheHashingJobActorData(
-      List(SingleFileHashRequest(jobDescriptor.key, HashKey("input", "File fileInput"), WdlFile("world"), None)),
-      Option(callCacheRead.ref)
+      List(SingleFileHashRequest(jobDescriptor.key, HashKey("input", "File fileInput"), WomSingleFile("world"), None)),
+      Option(callCacheRead.ref),
+      batchSize = 100
     )
   }
-  
+
   def makeCCHJA(callCacheReader: Option[ActorRef],
                 testFileHashingActor: ActorRef,
                 parent: ActorRef,
                 writeToCache: Boolean = true,
-                addFileHashMockResult: Option[(CallCacheHashingJobActorData, Option[CCHJAFileHashResponse])] = None) = {
-    TestFSMRef(new CallCacheHashingJobActor(
-      templateJobDescriptor(),
-      callCacheReader,
-      None,
-      Set.empty,
-      "backend",
-      Props.empty,
-      writeToCache = writeToCache,
-      DockerWithHash("ubuntu@256:blablabla")
-    ) {
-      override def makeFileHashingActor() = testFileHashingActor
-      override def addFileHash(hashResult: HashResult, data: CallCacheHashingJobActorData) = {
-        addFileHashMockResult.getOrElse(super.addFileHash(hashResult, data))
-      }
-    }, parent)
-  }
-  
+                addFileHashMockResult: Option[(CallCacheHashingJobActorData, Option[CCHJAFileHashResponse])] = None
+  ): TestFSMRef[CallCacheHashingJobActor.CallCacheHashingJobActorState,
+                CallCacheHashingJobActorData,
+                CallCacheHashingJobActor
+  ] =
+    TestFSMRef(
+      new CallCacheHashingJobActor(
+        templateJobDescriptor(),
+        callCacheReader,
+        None,
+        Set.empty,
+        "backend",
+        Props.empty,
+        DockerWithHash("ubuntu@256:blablabla"),
+        CallCachingActivity(readWriteMode = if (writeToCache) ReadAndWriteCache else ReadCache),
+        callCachePathPrefixes = None,
+        fileHashBatchSize = 100
+      ) {
+        override def makeFileHashingActor(): ActorRef = testFileHashingActor
+        override def addFileHash(hashResult: HashResult,
+                                 data: CallCacheHashingJobActorData
+        ): (CallCacheHashingJobActorData, Option[CCHJAFileHashResponse]) =
+          addFileHashMockResult.getOrElse(super.addFileHash(hashResult, data))
+      },
+      parent
+    )
+
   it should "send hash file requests when receiving a NextBatchOfFileHashesRequest" in {
     val callCacheReadProbe = TestProbe()
     val fileHashingActor = TestProbe()
-    
+
     val cchja = makeCCHJA(Option(callCacheReadProbe.ref), fileHashingActor.ref, TestProbe().ref)
 
     val fileHashRequest1 = SingleFileHashRequest(null, null, null, null)
     val fileHashRequest2 = SingleFileHashRequest(null, null, null, null)
     cchja.setState(
       WaitingForHashFileRequest,
-      CallCacheHashingJobActorData(List(List(fileHashRequest1, fileHashRequest2)), List.empty, None)
+      CallCacheHashingJobActorData(List(List(fileHashRequest1, fileHashRequest2)), List.empty, None, 50)
     )
 
     cchja ! NextBatchOfFileHashesRequest
@@ -158,53 +211,39 @@ class CallCacheHashingJobActorSpec extends TestKitSuite with FlatSpecLike with B
   it should "send NoFileHashesResult and stop if there are no input files" in {
     val parent = TestProbe()
     val callCacheReadProbe = TestProbe()
-    
+
     val cchja = makeCCHJA(Option(callCacheReadProbe.ref), TestProbe().ref, parent.ref)
     parent.watch(cchja)
-    
+
     cchja.setState(
       WaitingForHashFileRequest,
-      CallCacheHashingJobActorData(List.empty, List.empty, Option(callCacheReadProbe.ref))
+      CallCacheHashingJobActorData(List.empty, List.empty, Option(callCacheReadProbe.ref), 50)
     )
 
     cchja ! NextBatchOfFileHashesRequest
 
     callCacheReadProbe.expectMsgClass(classOf[InitialHashingResult])
     parent.expectMsgClass(classOf[InitialHashingResult])
-    
+
     callCacheReadProbe.expectMsg(NoFileHashesResult)
     parent.expectMsg(NoFileHashesResult)
     parent.expectTerminated(cchja)
   }
 
-  it should "send the PartialFileHashingResult when a batch is complete" in {
-    val callCacheReadProbe = TestProbe()
-    val hashResults = NonEmptyList.of(mock[HashResult])
-    
-    val result: PartialFileHashingResult = PartialFileHashingResult(hashResults)
-    val newData: CallCacheHashingJobActorData = CallCacheHashingJobActorData(List.empty, List.empty, Option(callCacheReadProbe.ref))
-    
-    val cchja = makeCCHJA(Option(callCacheReadProbe.ref), TestProbe().ref, TestProbe().ref, writeToCache = true, Option(newData -> Option(result)))
-
-    cchja.setState(HashingFiles)
-
-    cchja ! FileHashResponse(mock[HashResult])
-
-    callCacheReadProbe.expectMsgClass(classOf[InitialHashingResult])
-    callCacheReadProbe.expectMsg(result)
-    cchja.stateName shouldBe WaitingForHashFileRequest
-    cchja.stateData shouldBe newData
-  }
-
-  it should "send itself a NextBatchOfFileHashesRequest when a batch is complete and there is no CCReader" in {
+  def selfSendNextBatchRequest(ccReader: Option[ActorRef]): Assertion = {
     val fileHashingActor = TestProbe()
     val result: PartialFileHashingResult = PartialFileHashingResult(NonEmptyList.of(mock[HashResult]))
     val fileHashRequest = SingleFileHashRequest(null, null, null, null)
-    val newData = CallCacheHashingJobActorData(List(List(fileHashRequest)), List.empty, None)
+    val newData = CallCacheHashingJobActorData(List(List(fileHashRequest)), List.empty, ccReader, 50)
     // still gives a CCReader when instantiating the actor, but not in the data (above)
     // This ensures the check is done with the data and not the actor attribute, as the data will change if the ccreader dies but the actor attribute
     // will stay Some(...)
-    val cchja = makeCCHJA(Option(TestProbe().ref), fileHashingActor.ref, TestProbe().ref, writeToCache = true, Option(newData -> Option(result)))
+    val cchja = makeCCHJA(Option(TestProbe().ref),
+                          fileHashingActor.ref,
+                          TestProbe().ref,
+                          writeToCache = true,
+                          Option(newData -> Option(result))
+    )
     watch(cchja)
     cchja.setState(HashingFiles)
 
@@ -215,12 +254,26 @@ class CallCacheHashingJobActorSpec extends TestKitSuite with FlatSpecLike with B
     cchja.stateName shouldBe HashingFiles
   }
 
+  List(
+    ("send itself a NextBatchOfFileHashesRequest when a batch is complete and there is no CC Reader", None),
+    ("send itself a NextBatchOfFileHashesRequest when a batch is complete and there is a CC Reader",
+     Option(TestProbe().ref)
+    )
+  ) foreach { case (description, ccReader) =>
+    it should description in selfSendNextBatchRequest(ccReader)
+  }
+
   it should "send FinalFileHashingResult to parent and CCReader and die" in {
     val parent = TestProbe()
     val callCacheReadProbe = TestProbe()
     List(CompleteFileHashingResult(Set(mock[HashResult]), "AggregatedFileHash"), NoFileHashesResult) foreach { result =>
-      val newData = CallCacheHashingJobActorData(List.empty, List.empty, Option(callCacheReadProbe.ref))
-      val cchja = makeCCHJA(Option(callCacheReadProbe.ref), TestProbe().ref, parent.ref, writeToCache = true, Option(newData -> Option(result)))
+      val newData = CallCacheHashingJobActorData(List.empty, List.empty, Option(callCacheReadProbe.ref), 50)
+      val cchja = makeCCHJA(Option(callCacheReadProbe.ref),
+                            TestProbe().ref,
+                            parent.ref,
+                            writeToCache = true,
+                            Option(newData -> Option(result))
+      )
 
       parent.expectMsgClass(classOf[InitialHashingResult])
       callCacheReadProbe.expectMsgClass(classOf[InitialHashingResult])
@@ -239,8 +292,14 @@ class CallCacheHashingJobActorSpec extends TestKitSuite with FlatSpecLike with B
   it should "wait for next file hash if the batch is not complete yet" in {
     val callCacheReadProbe = TestProbe()
     val parent = TestProbe()
-    val newData: CallCacheHashingJobActorData = CallCacheHashingJobActorData(List.empty, List.empty, Option(callCacheReadProbe.ref))
-    val cchja = makeCCHJA(Option(callCacheReadProbe.ref), TestProbe().ref, parent.ref, writeToCache = true, Option(newData -> None))
+    val newData: CallCacheHashingJobActorData =
+      CallCacheHashingJobActorData(List.empty, List.empty, Option(callCacheReadProbe.ref), 50)
+    val cchja = makeCCHJA(Option(callCacheReadProbe.ref),
+                          TestProbe().ref,
+                          parent.ref,
+                          writeToCache = true,
+                          Option(newData -> None)
+    )
 
     parent.expectMsgClass(classOf[InitialHashingResult])
     callCacheReadProbe.expectMsgClass(classOf[InitialHashingResult])
@@ -249,8 +308,8 @@ class CallCacheHashingJobActorSpec extends TestKitSuite with FlatSpecLike with B
 
     cchja ! FileHashResponse(mock[HashResult])
 
-    callCacheReadProbe.expectNoMsg()
-    parent.expectNoMsg()
+    callCacheReadProbe.expectNoMessage()
+    parent.expectNoMessage()
     cchja.stateName shouldBe HashingFiles
   }
 
@@ -273,10 +332,10 @@ class CallCacheHashingJobActorSpec extends TestKitSuite with FlatSpecLike with B
 
     val hashKey = HashKey("file")
     val fileHashRequest: SingleFileHashRequest = SingleFileHashRequest(null, hashKey, null, null)
-    val data = CallCacheHashingJobActorData(List(List(fileHashRequest)), List.empty, Option(callCacheReadProbe.ref))
-    
+    val data = CallCacheHashingJobActorData(List(List(fileHashRequest)), List.empty, Option(callCacheReadProbe.ref), 50)
+
     cchja.setState(WaitingForHashFileRequest, data)
-    
+
     system stop callCacheReadProbe.ref
     fileHasher.expectMsg(fileHashRequest)
     val result: HashResult = HashResult(hashKey, HashValue("fileHash"))
@@ -284,7 +343,7 @@ class CallCacheHashingJobActorSpec extends TestKitSuite with FlatSpecLike with B
 
     parent.expectMsg(CompleteFileHashingResult(Set(result), "45F27DD26834DBACBB05BBB1D651F5D1"))
   }
-  
+
   it should "propagate HashingFailedMessage errors and die" in {
     val callCacheReadProbe = TestProbe()
     val parent = TestProbe()
@@ -293,19 +352,22 @@ class CallCacheHashingJobActorSpec extends TestKitSuite with FlatSpecLike with B
     cchja.setState(WaitingForHashFileRequest)
     parent.expectMsgClass(classOf[InitialHashingResult])
     callCacheReadProbe.expectMsgClass(classOf[InitialHashingResult])
-    
-    val hashFailed = HashingFailedMessage("fileName", new Exception("Hashing failed ! - part of test flow"))
+
+    val hashFailed = HashingFailedMessage(
+      "fileName",
+      new Exception("Hashing failed ! - part of test flow") with NoStackTrace
+    )
     cchja ! hashFailed
     parent.expectMsg(hashFailed)
     callCacheReadProbe.expectMsg(hashFailed)
     parent.expectTerminated(cchja)
   }
-  
+
   it should "run properly when writeToCache is ON and there is no CCRead actor" in {
     val parent = TestProbe()
     val cchja = makeCCHJA(None, TestProbe().ref, parent.ref)
     parent.watch(cchja)
-    
+
     parent.expectMsgClass(classOf[InitialHashingResult])
     parent.expectMsg(NoFileHashesResult)
     parent.expectTerminated(cchja)

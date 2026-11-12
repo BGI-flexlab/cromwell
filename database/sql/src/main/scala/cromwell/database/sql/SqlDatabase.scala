@@ -5,23 +5,18 @@ import java.util.UUID
 
 import com.typesafe.config.{Config, ConfigFactory, ConfigValueFactory}
 
-trait SqlDatabase extends AutoCloseable
-  with JobKeyValueSqlDatabase
-  with CallCachingSqlDatabase
-  with JobStoreSqlDatabase
-  with MetadataSqlDatabase
-  with WorkflowStoreSqlDatabase
-  with SubWorkflowStoreSqlDatabase
-  with DockerHashStoreSqlDatabase {
-
+trait SqlDatabase extends AutoCloseable {
   protected val urlKey: String
   protected val originalDatabaseConfig: Config
   lazy val databaseConfig = SqlDatabase.withUniqueSchema(originalDatabaseConfig, urlKey)
+
+  def connectionDescription: String
 
   def withConnection[A](block: Connection => A): A
 }
 
 object SqlDatabase {
+
   /**
     * Modifies config.getString("url") to return a unique schema, if the original url contains the text
     * "\${uniqueSchema}".

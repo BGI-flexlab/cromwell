@@ -1,11 +1,10 @@
 package cromwell.database.sql.tables
 
-import java.sql.Clob
+import javax.sql.rowset.serial.SerialClob
 
-case class CallCachingDetritusEntry
-(
+case class CallCachingDetritusEntry(
   detritusKey: String,
-  detritusValue: Option[Clob],
-  callCachingEntryId: Option[Int] = None,
-  callCachingDetritusEntryId: Option[Int] = None
+  detritusValue: Option[SerialClob],
+  callCachingEntryId: Option[Long] = None,
+  callCachingDetritusEntryId: Option[Long] = None
 )

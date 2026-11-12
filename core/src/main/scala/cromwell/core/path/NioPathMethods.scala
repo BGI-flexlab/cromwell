@@ -1,10 +1,8 @@
 package cromwell.core.path
 
-import java.net.URI
 import java.nio.file.WatchEvent.{Kind, Modifier}
 import java.nio.file.{LinkOption, WatchKey, WatchService}
-
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 /**
   * Implements methods with the same names and signatures as java.nio.Path
@@ -36,7 +34,10 @@ trait NioPathMethods {
 
   final def getNameCount: Int = nioPathPrivate.getNameCount
 
-  final def toUri: URI = nioPathPrivate.toUri
+  /* This method cannot be used safely because it could fail for valid GcsPaths that are not valid URIs
+   * See https://github.com/GoogleCloudPlatform/google-cloud-java/issues/1343
+   */
+  // final def toUri: URI = nioPathPrivate.toUri
 
   final def compareTo(other: Path): Int = nioPathPrivate.compareTo(other.nioPathPrivate)
 
@@ -66,4 +67,11 @@ trait NioPathMethods {
   final def startsWith(other: String): Boolean = nioPathPrivate.startsWith(other)
 
   final def toRealPath(options: LinkOption*): Path = newPath(nioPathPrivate.toRealPath(options: _*))
+
+  /**
+    * Get a valid path object that resolves symlinks if supported
+    * Default implementation assumes symlinks are supported, and that toRealPath may return a valid path.
+    * This implementation may be overridden for NIO implementations that do not support symbolic links (For example the Azure NIO library)
+    */
+  def getSymlinkSafePath(options: LinkOption*): Path = toRealPath(options: _*)
 }

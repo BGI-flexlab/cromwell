@@ -1,0 +1,197 @@
+# Filesystems
+
+Most workflows represent their inputs and outputs in the form of files. Those files are stored in filesystems. There exists many filesystems. This section describes which filesystems Cromwell supports.
+
+## Overview
+
+Filesystems are configurable. The `reference.conf`, which is the configuration inherited by any Cromwell instance, contains the following:
+
+```hocon
+# Filesystems available in this Crowmell instance
+# They can be enabled individually in the engine.filesystems stanza and in the config.filesystems stanza of backends
+# There is a default built-in local filesytem that can also be referenced as "local" as well.
+filesystems {
+  drs {
+      class = "cromwell.filesystems.drs.DrsPathBuilderFactory"
+      # Use to share a unique global object across all instances of the factory
+      global {
+        # Class to instantiate and propagate to all factories. Takes a single typesafe config argument
+        class = "cromwell.filesystems.drs.DrsFileSystemConfig"
+        config {
+          resolver {
+            url = https://drshub-url-here"
+            # How long to wait for the server to start responding
+            # Default is the informal standard around the DRS ecosystem
+            request-timeout = 60 seconds
+            # The number of times to retry failures connecting or HTTP 429 or HTTP 5XX responses, default 3.
+            num-retries = 3
+            # How long to wait between retrying HTTP 429 or HTTP 5XX responses, default 10 seconds.
+            wait-initial = 30 seconds
+            # The maximum amount of time to wait between retrying HTTP 429 or HTTP 5XX responses, default 30 seconds.
+            wait-maximum = 60 seconds
+            # The amount to multiply the amount of time to wait between retrying HTTP or 429 or HTTP 5XX responses.
+            # Default 1.25, and will never multiply the wait time more than wait-maximum.
+            wait-mulitiplier = 1.25
+            # The randomization factor to use for creating a range around the wait interval.
+            # A randomization factor of 0.5 results in a random period ranging between 50% below and 50% above the wait
+            # interval. Default 0.1.
+            wait-randomization-factor = 0.1
+          }
+        }
+      }
+   }
+  gcs {
+    class = "cromwell.filesystems.gcs.GcsPathBuilderFactory"
+  }
+  s3 {
+    class = "cromwell.filesystems.s3.S3PathBuilderFactory"
+  }
+  http {
+    class = "cromwell.filesystems.http.HttpPathBuilderFactory"
+  }
+}
+```
+
+It defines the filesystems that can be accessed by Cromwell.
+Those filesystems can be referenced by their name (`drs`, `gcs`, `s3`, `http` and `local`) in other parts of the configuration.
+
+**Note:**
+- **S3 filesystem is experimental.** 
+- **DRS filesystem has initial support only. Also, currently it works only with [GCS filesystem](../GoogleCloudStorage) in the [GCP Batch backend](../backends/GCPBatch.md).**
+
+
+Also note that the local filesystem (the one on which Cromwell runs on) is implicitly accessible but can be disabled. 
+To do so, add the following to any `filesystems` stanza in which the local filesystem should be disabled: `local.enabled: false`.
+
+### Engine Filesystems
+
+Cromwell is conceptually divided in an engine part and a backend part. One Cromwell instance corresponds to an "engine" but can have multiple backends configured.
+The `engine.filesystems` section configures filesystems that Cromwell can use when it needs to interact with files outside of the context of a backend.
+
+For instance, consider the following WDL:
+
+```wdl
+version 1.0
+
+workflow my_workflow {
+    String s = read_string("/Users/me/my_file.txt")
+    output {
+        String out = s
+    }
+}
+```
+
+This workflow is valid WDL and does not involve any backend, or even a task. However it does involve interacting with a filesystem to retrieve the content of `my_file.txt`
+With a default configuration Cromwell will be able to run this workflow because the local filesystem is enabled by default.
+If the file is located on a different filesystem (a cloud filesystem for instance), we would need to modify the configuration to tell Cromwell how to interact with this filesystem:
+
+```hocon
+engine {
+  filesystems {
+    gcs {
+      auth = "application-default"
+    }
+  }
+}
+```
+
+(See the [Google section](../backends/GCPBatch.md) for information about the `auth` field.)
+
+We can now run this workflow
+
+```wdl
+version 1.0
+
+workflow my_workflow {
+    String s = read_string("gs://mybucket/my_file.txt")
+    output {
+        String out = s
+    }
+}
+```
+
+#### Default "engine" Filesystems
+
+If you don't change anything in your own configuration file, the following default is inherited from `reference.conf`:
+```
+engine {
+  filesystems {
+    local {
+      enabled: true
+    }
+    http {
+      enabled: true
+    }
+  }
+}
+```
+
+**Note**: since our configuration files are HOCON, to disable filesystems you *must* add `enabled: false` into your 
+overriding configuration file. It is **not** sufficient to simply omit a filesystem from your stanza. 
+
+For example: adding this to your configuration file will remove the `http` filesystem and leave `local` for use in the 
+engine:
+```
+engine {
+  filesystems {
+    http {
+      enabled: false
+    }
+  }
+}
+```
+
+Whereas this example will leave `http` unchanged and merely re-assert the default enabling of `local`. In other
+words, **this will do nothing**:
+```
+engine {
+  filesystems {
+    local {
+      enabled: true
+    }
+  }
+}
+```
+
+### Backend Filesystems
+
+Similarly to the engine, you can also configure backend filesystems individually. Some backends might require the use of a specific filesystem.
+For example, the [GCP Batch](../tutorials/GcpBatch101.md) backend requires Google Cloud Storage.
+Let's take another example:
+
+```wdl
+version 1.0
+
+task my_pipelines_task {
+    input {
+        File input_file
+    }
+    String content = read_string(input_file)
+    
+    command {
+        echo ~{content}
+    }
+    
+    runtime {
+        docker: "ubuntu"
+    }
+}
+workflow my_workflow {
+    call my_pipelines_task { input: input_file = "gs://mybucket/my_file.txt" }
+}
+```
+
+Suppose this workflow is submitted to a Cromwell running a Pipelines API backend. This time the `read_string` function is in the context of a task run by the backend.
+The filesystem configuration used will be the one in the `config` section of the Pipelines API backend.
+
+### Supported Filesystems
+
+-  Shared File System (SFS)
+
+-  Google Cloud Storage (GCS) - [Cromwell Doc](GoogleCloudStorage.md) / [Google Doc](https://cloud.google.com/storage/)
+
+-  Simple Storage Service (S3) - [Amazon Doc](https://aws.amazon.com/documentation/s3/)
+
+-  HTTP - support for `http` or `https` URLs for [workflow inputs only](http://cromwell.readthedocs.io/en/develop/filesystems/HTTP)
+
+- File Transfer Protocol (FTP) - [Cromwell Doc](FileTransferProtocol.md)

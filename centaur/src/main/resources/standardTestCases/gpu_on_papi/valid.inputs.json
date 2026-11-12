@@ -1,0 +1,3 @@
+{
+  "gpu_on_papi.gpus": [ "nvidia-tesla-t4", "nvidia-tesla-v100", "nvidia-tesla-p4" ]
+}

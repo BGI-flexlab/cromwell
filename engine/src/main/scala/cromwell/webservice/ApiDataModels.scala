@@ -1,33 +1,35 @@
 package cromwell.webservice
 
-import lenthall.exception.MessageAggregation
+import common.exception.MessageAggregation
+import org.apache.commons.lang3.exception.ExceptionUtils
 import spray.json._
-import wdl4s.FullyQualifiedName
-import wdl4s.values.WdlValue
-
+import wdl.draft2.model.FullyQualifiedName
+import wom.values.WomValue
 
 case class WorkflowStatusResponse(id: String, status: String)
 
 case class WorkflowSubmitResponse(id: String, status: String)
 
-case class WorkflowOutputResponse(id: String, outputs: Map[FullyQualifiedName, WdlValue])
+case class WorkflowOutputResponse(id: String, outputs: Map[FullyQualifiedName, WomValue])
 
 case class WorkflowAbortResponse(id: String, status: String)
 
-case class CallOutputResponse(id: String, callFqn: String, outputs: Map[FullyQualifiedName, WdlValue])
+case class CallOutputResponse(id: String, callFqn: String, outputs: Map[FullyQualifiedName, WomValue])
 
 case class WorkflowMetadataQueryParameters(outputs: Boolean = true, timings: Boolean = true)
 
 object APIResponse {
 
-  private def constructFailureResponse(status: String, ex: Throwable) ={
+  private def constructFailureResponse(status: String, ex: Throwable) =
     ex match {
       case exceptionWithErrors: MessageAggregation =>
-        FailureResponse(status, exceptionWithErrors.getMessage,
-          Option(JsArray(exceptionWithErrors.errorMessages.toList.map(JsString(_)).toVector)))
-      case e: Throwable => FailureResponse(status, e.getMessage, None)
+        FailureResponse(status,
+                        exceptionWithErrors.exceptionContext,
+                        Option(exceptionWithErrors.errorMessages.toVector)
+        )
+      case e: Throwable =>
+        FailureResponse(status, e.getMessage, Option(e.getCause).map(c => Vector(ExceptionUtils.getMessage(c))))
     }
-  }
 
   /** When the data submitted in the request is incorrect. */
   def fail(ex: Throwable) = constructFailureResponse("fail", ex)
@@ -40,4 +42,4 @@ object APIResponse {
 }
 
 case class SuccessResponse(status: String, message: String, data: Option[JsValue])
-case class FailureResponse(status: String, message: String, errors: Option[JsValue])
+case class FailureResponse(status: String, message: String, errors: Option[Vector[String]])

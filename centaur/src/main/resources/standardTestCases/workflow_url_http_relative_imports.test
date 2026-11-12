@@ -1,0 +1,13 @@
+name: workflow_url_http_relative_imports
+testFormat: workflowsuccess
+tags: ["wdl_biscayne"]
+
+files {
+  workflowUrl: "https://raw.githubusercontent.com/broadinstitute/cromwell/fc16ebb2f3d7bc59c8ea7a49460a49cf21031600/centaur/src/main/resources/standardTestCases/wdl_biscayne/biscayne_http_relative_imports/biscayne_http_relative_imports.wdl"
+}
+
+metadata {
+  workflowName: biscayne_http_relative_imports
+  status: Succeeded
+  "outputs.biscayne_http_relative_imports.result": 105
+}

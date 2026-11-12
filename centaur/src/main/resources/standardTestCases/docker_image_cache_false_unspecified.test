@@ -1,0 +1,15 @@
+name: docker_image_cache_false_unspecified
+testFormat: workflowsuccess
+# if Docker image caches
+backends: [GCPBATCH_DOCKER_IMAGE_CACHE_NOT_IMPLEMENTED]
+
+files {
+  workflow: docker_image_cache/docker_image_cache_false.wdl
+  options: docker_image_cache/docker_image_cache_unspecified.options.json
+}
+
+metadata {
+  workflowName: docker_image_cache_false_test
+  status: Succeeded
+  "outputs.docker_image_cache_false_test.is_docker_image_cache_disk_mounted": false
+}

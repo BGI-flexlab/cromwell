@@ -1,78 +1,69 @@
 package cromwell.core.io
 
-import akka.actor.{Actor, ActorLogging, ActorRef}
+import akka.actor.ActorRef
+import com.typesafe.config.{Config, ConfigFactory}
+import cromwell.core.callcaching.FileHashStrategy
+import cromwell.core.io.IoPromiseProxyActor.IoCommandWithPromise
 import cromwell.core.path.BetterFileMethods.OpenOptions
 import cromwell.core.path.Path
 
+import scala.concurrent.Future
 import scala.concurrent.duration._
-import scala.concurrent.{Future, Promise}
-import scala.language.postfixOps
+import net.ceedubs.ficus.Ficus._
 
+import scala.util.{Failure, Success, Try}
 
-trait AsyncIo extends IoClientHelper { this: Actor with ActorLogging with IoCommandBuilder =>
-  
-  protected val ioTimeout = 3 minutes
-  
-  override private [core] def ioResponseReceive: Receive = {
-    case (promise: Promise[_], ack: IoAck[Any] @unchecked) =>
-      cancelTimeout(promise -> ack.command)
-      // This is not typesafe. 
-      // However the sendIoCommand method ensures that the command and the promise have the same generic type
-      // Which means as long as only the sendIoCommand method is used to send requests, and the ioActor honors his contract
-      // and send back the right context with the right response, the types are virtually guaranteed to match.
-      promise.asInstanceOf[Promise[Any]].complete(ack.toTry)
-      ()
-  }
-  
+object AsyncIo {
+  private val ioTimeouts = ConfigFactory.load().as[Config]("system.io.timeout")
+  val defaultTimeout: FiniteDuration = ioTimeouts.as[FiniteDuration]("default")
+  val copyTimeout: FiniteDuration = ioTimeouts.as[FiniteDuration]("copy")
+}
+
+/**
+  * Provides Futurized methods for I/O actions processed through the IoActor
+  */
+class AsyncIo(ioEndpoint: ActorRef, ioCommandBuilder: IoCommandBuilder) {
+  private def asyncCommand[A](commandTry: Try[IoCommand[A]],
+                              timeout: FiniteDuration = AsyncIo.defaultTimeout
+  ): Future[A] =
+    commandTry match {
+      case Failure(throwable) =>
+        Future.failed(throwable)
+      case Success(command) =>
+        val commandWithPromise = IoCommandWithPromise(command, timeout)
+        ioEndpoint ! commandWithPromise
+        commandWithPromise.promise.future
+    }
+
   /**
     * IMPORTANT: This loads the entire content of the file into memory !
     * Only use for small files !
     */
-  def contentAsStringAsync(path: Path): Future[String] = {
-    val promise = Promise[String]
-    sendIoCommandWithPromise(contentAsStringCommand(path), promise)
-    promise.future
-  }
-  
-  def writeAsync(path: Path, content: String, options: OpenOptions): Future[Unit] = {
-    val promise = Promise[Unit]
-    sendIoCommandWithPromise(writeCommand(path, content, options), promise)
-    promise.future
-  }
+  def contentAsStringAsync(path: Path, maxBytes: Option[Int], failOnOverflow: Boolean): Future[String] =
+    asyncCommand(ioCommandBuilder.contentAsStringCommand(path, maxBytes, failOnOverflow))
 
-  def sizeAsync(path: Path): Future[Long] = {
-    val promise = Promise[Long]
-    sendIoCommandWithPromise(sizeCommand(path), promise)
-    promise.future
-  }
+  def writeAsync(path: Path, content: String, options: OpenOptions, compressPayload: Boolean = false): Future[Unit] =
+    asyncCommand(ioCommandBuilder.writeCommand(path, content, options, compressPayload))
 
-  def hashAsync(path: Path): Future[String] = {
-    val promise = Promise[String]
-    sendIoCommandWithPromise(hashCommand(path), promise)
-    promise.future
-  }
+  def sizeAsync(path: Path): Future[Long] =
+    asyncCommand(ioCommandBuilder.sizeCommand(path))
 
-  def deleteAsync(path: Path, swallowIoExceptions: Boolean = false): Future[Unit] = {
-    val promise = Promise[Unit]
-    sendIoCommandWithPromise(deleteCommand(path, swallowIoExceptions), promise)
-    promise.future
-  }
+  def hashAsync(path: Path, hashStrategy: FileHashStrategy): Future[String] =
+    asyncCommand(ioCommandBuilder.hashCommand(path, hashStrategy))
 
-  def copyAsync(src: Path, dest: Path, overwrite: Boolean = true): Future[Unit] = {
-    val promise = Promise[Unit]
+  def deleteAsync(path: Path, swallowIoExceptions: Boolean = false): Future[Unit] =
+    asyncCommand(ioCommandBuilder.deleteCommand(path, swallowIoExceptions))
+
+  def existsAsync(path: Path): Future[Boolean] =
+    asyncCommand(ioCommandBuilder.existsCommand(path))
+
+  def readLinesAsync(path: Path): Future[Iterable[String]] =
+    asyncCommand(ioCommandBuilder.readLines(path))
+
+  def isDirectory(path: Path): Future[Boolean] =
+    asyncCommand(ioCommandBuilder.isDirectoryCommand(path))
+
+  def copyAsync(src: Path, dest: Path): Future[Unit] =
     // Allow for a much larger timeout for copies, as large files can take a while (even on gcs, if they are in different locations...)
-    sendIoCommandWithPromise(copyCommand(src, dest, overwrite), promise, 1 hour)
-    promise.future
-  }
-
-  private def sendIoCommandWithPromise[T](command: IoCommand[T], promise: Promise[T], timeout: FiniteDuration = ioTimeout) = {
-    sendIoCommandWithContext(command, promise, timeout)
-  }
-
-  override def onTimeout(message: Any, to: ActorRef): Unit = message match {
-    case (promise: Promise[_], ioAck: IoAck[_]) => 
-      promise.tryFailure(IoTimeout(ioAck.command))
-      ()
-    case _ =>
-  }
+    asyncCommand(ioCommandBuilder.copyCommand(src, dest), AsyncIo.copyTimeout)
 }

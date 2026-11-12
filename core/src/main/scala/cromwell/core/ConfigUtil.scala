@@ -7,25 +7,25 @@ import cats.syntax.validated._
 import com.typesafe.config.{Config, ConfigException, ConfigValue}
 import org.slf4j.LoggerFactory
 
-import scala.collection.JavaConversions._
-import scala.reflect.{ClassTag, classTag}
+import scala.jdk.CollectionConverters._
+import scala.reflect.{classTag, ClassTag}
 
 object ConfigUtil {
 
   val validationLogger = LoggerFactory.getLogger("ConfigurationValidation")
 
   implicit class EnhancedConfig(val config: Config) extends AnyVal {
-    def keys = config.entrySet().toSet map { v: java.util.Map.Entry[String, ConfigValue] => v.getKey }
+    def keys = config.entrySet().asScala.toSet map { v: java.util.Map.Entry[String, ConfigValue] => v.getKey }
 
     /**
      * For keys that are in the configuration but not in the reference keySet, log a warning.
      */
-    def warnNotRecognized(keySet: Set[String], context: String) = {
+    def warnNotRecognized(keySet: Set[String], context: String) =
       keys.diff(keySet) match {
-        case warnings if warnings.nonEmpty => validationLogger.warn(s"Unrecognized configuration key(s) for $context: ${warnings.mkString(", ")}")
+        case warnings if warnings.nonEmpty =>
+          validationLogger.warn(s"Unrecognized configuration key(s) for $context: ${warnings.mkString(", ")}")
         case _ =>
       }
-    }
 
     /**
      * Validates that the value for this key is a well formed URL.
@@ -34,22 +34,23 @@ object ConfigUtil {
       new URL(config.getString(url))
     }
 
-    def validateString(key: String): ValidatedNel[String, String] = try {
+    def validateString(key: String): ValidatedNel[String, String] = try
       config.getString(key).validNel
-    } catch {
-      case e: ConfigException.Missing => s"Could not find key: $key".invalidNel
+    catch {
+      case _: ConfigException.Missing => s"Could not find key: $key".invalidNel
     }
 
-    def validateConfig(key: String): ValidatedNel[String, Config] = try {
+    def validateConfig(key: String): ValidatedNel[String, Config] = try
       config.getConfig(key).validNel
-    } catch {
-      case e: ConfigException.Missing => s"Could not find key: $key".invalidNel
-      case e: ConfigException.WrongType => s"key $key cannot be parsed to a Config".invalidNel
+    catch {
+      case _: ConfigException.Missing => s"Could not find key: $key".invalidNel
+      case _: ConfigException.WrongType => s"key $key cannot be parsed to a Config".invalidNel
     }
 
   }
 
   implicit class EnhancedValidation[I <: AnyRef](val value: I) extends AnyVal {
+
     /**
      * Validates this value by applying validationFunction to it and returning a Validation:
      * Returns successNel upon success.
@@ -58,9 +59,9 @@ object ConfigUtil {
      * @tparam O return type of validationFunction
      * @tparam E Restricts the subtype of Exception that should be caught during validation
      */
-    def validateAny[O, E <: Exception: ClassTag](validationFunction: I => O): ValidatedNel[String, O] = try {
+    def validateAny[O, E <: Exception: ClassTag](validationFunction: I => O): ValidatedNel[String, O] = try
       validationFunction(value).validNel
-    } catch {
+    catch {
       case e if classTag[E].runtimeClass.isInstance(e) => e.getMessage.invalidNel
     }
   }

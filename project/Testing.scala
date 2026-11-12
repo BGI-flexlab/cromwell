@@ -1,95 +1,129 @@
+import Dependencies._
+import sbt.Defaults._
 import sbt.Keys._
 import sbt._
+import complete.DefaultParsers._
+import sbt.util.Logger
+
+import scala.sys.process._
 
 object Testing {
-  lazy val AllTests = config("alltests") extend Test
-  lazy val DockerTest = config("docker") extend Test
-  lazy val NoDockerTest = config("nodocker") extend Test
-  lazy val CromwellIntegrationTest = config("integration") extend Test
-  lazy val CromwellBenchmarkTest = config("benchmark") extend Test
-  lazy val CromwellNoIntegrationTest = config("nointegration") extend Test
-  lazy val DbmsTest = config("dbms") extend Test
+  private val AllTests = config("alltests") extend Test
 
-  lazy val DockerTestTag = "DockerTest"
-  lazy val UseDockerTaggedTests = Tests.Argument(TestFrameworks.ScalaTest, "-n", DockerTestTag)
-  lazy val DontUseDockerTaggedTests = Tests.Argument(TestFrameworks.ScalaTest, "-l", DockerTestTag)
+  private val DockerTestTag = "DockerTest"
+  private val CromwellIntegrationTestTag = "CromwellIntegrationTest"
+  private val GcsIntegrationTestTag = "GcsIntegrationTest"
+  private val AwsIntegrationTestTag = "AwsTest"
+  private val DbmsTestTag = "DbmsTest"
 
-  lazy val CromwellIntegrationTestTag = "CromwellIntegrationTest"
-  lazy val UseCromwellIntegrationTaggedTests = Tests.Argument(TestFrameworks.ScalaTest, "-n", CromwellIntegrationTestTag)
-  lazy val DontUseCromwellIntegrationTaggedTests = Tests.Argument(TestFrameworks.ScalaTest, "-l", CromwellIntegrationTestTag)
+  private val AllTestTags = List(
+    DockerTestTag,
+    CromwellIntegrationTestTag,
+    GcsIntegrationTestTag,
+    AwsIntegrationTestTag,
+    DbmsTestTag
+  )
 
-  lazy val GcsIntegrationTestTag = "GcsIntegrationTest"
-  lazy val UseGcsIntegrationTaggedTests = Tests.Argument(TestFrameworks.ScalaTest, "-n", GcsIntegrationTestTag)
-  lazy val DontUseGcsIntegrationTaggedTests = Tests.Argument(TestFrameworks.ScalaTest, "-l", GcsIntegrationTestTag)
+  val minnieKenny = inputKey[Unit]("Run minnie-kenny.")
 
-  lazy val DbmsTestTag = "DbmsTest"
-  lazy val UseDbmsTaggedTests = Tests.Argument(TestFrameworks.ScalaTest, "-n", DbmsTestTag)
-  lazy val DontUseDbmsTaggedTests = Tests.Argument(TestFrameworks.ScalaTest, "-l", DbmsTestTag)
+  private val includeTestTags: Seq[String] =
+    sys.env
+      .get("CROMWELL_SBT_TEST_INCLUDE_TAGS")
+      .filter(_.nonEmpty)
+      .map(_.split(",").toList.map(_.trim))
+      .getOrElse(Nil)
 
-  lazy val PostMVPTag = "PostMVP"
-  lazy val DontUsePostMVPTaggedTests = Tests.Argument(TestFrameworks.ScalaTest, "-l", PostMVPTag)
+  private val excludeTestTags: Seq[String] =
+    sys.env
+      .get("CROMWELL_SBT_TEST_EXCLUDE_TAGS")
+      .filter(_.nonEmpty)
+      .map(_.split(",").toList.map(_.trim))
+      .getOrElse(AllTestTags)
 
-  lazy val TestReportArgs = Tests.Argument(TestFrameworks.ScalaTest, "-oDSI", "-h", "target/test-reports")
+  private val spanScaleFactor: String = sys.env.getOrElse("CROMWELL_SBT_TEST_SPAN_SCALE_FACTOR", "1")
 
   /*
   The arguments that will be added to the default test config, but removed from all other configs.
   `sbt coverage test` adds other arguments added to generate the coverage reports.
   Tracking the arguments we add to the default allows one to later remove them when building up other configurations.
- */
-  lazy val defaultExcludeTests = Seq(DontUseDockerTaggedTests, DontUseCromwellIntegrationTaggedTests,
-    DontUseDbmsTaggedTests, DontUseGcsIntegrationTaggedTests, DontUsePostMVPTaggedTests)
+   */
+  private val includeTestArgs = includeTestTags.map(Tests.Argument(TestFrameworks.ScalaTest, "-n", _))
+  private val excludeTestArgs = excludeTestTags.map(Tests.Argument(TestFrameworks.ScalaTest, "-l", _))
+  private val filterTestArgs = if (includeTestArgs.nonEmpty) includeTestArgs else excludeTestArgs
+
+  private val TestReportArgs =
+    Tests.Argument(
+      TestFrameworks.ScalaTest,
+      "-oDSI",
+      "-u",
+      "target/test-reports",
+      "-F",
+      spanScaleFactor,
+      "-W",
+      "300",
+      "300"
+    )
+
+  /** Run minnie-kenny only once per sbt invocation. */
+  class MinnieKennySingleRunner() {
+    private val mutex = new Object
+    private var resultOption: Option[Int] = None
+
+    /** Run using the logger, throwing an exception only on the first failure. */
+    def runOnce(log: Logger, args: Seq[String]): Unit =
+      mutex synchronized {
+        if (resultOption.isEmpty) {
+          log.debug(s"Running minnie-kenny.sh${args.mkString(" ", " ", "")}")
+          val result = ("./minnie-kenny.sh" +: args) ! log
+          resultOption = Option(result)
+          if (result == 0)
+            log.debug("Successfully ran minnie-kenny.sh")
+          else
+            sys.error("Running minnie-kenny.sh failed. Please double check for errors above.")
+        }
+      }
+  }
+
+  // Only run one minnie-kenny.sh at a time!
+  private lazy val minnieKennySingleRunner = new MinnieKennySingleRunner
 
   val testSettings = List(
-    // `test` (or `assembly`) - Run all tests, except docker and integration and DBMS
-    testOptions in Test ++= Seq(TestReportArgs) ++ defaultExcludeTests,
+    libraryDependencies ++= testDependencies.map(_ % Test),
+    // `test` (or `assembly`) - Run most tests
+    Test / testOptions ++= Seq(TestReportArgs) ++ filterTestArgs,
     // `alltests:test` - Run all tests
-    testOptions in AllTests := (testOptions in Test).value.diff(defaultExcludeTests),
-    // `docker:test` - Run only the docker tests.
-    testOptions in DockerTest := (testOptions in AllTests).value ++ Seq(UseDockerTaggedTests),
-    // `nodocker:test` - Run all tests, except docker
-    testOptions in NoDockerTest := (testOptions in AllTests).value ++ Seq(DontUseDockerTaggedTests),
-    // `integration:test` - Run only integration tests
-    testOptions in CromwellIntegrationTest := (testOptions in AllTests).value ++ Seq(UseCromwellIntegrationTaggedTests, UseGcsIntegrationTaggedTests),
-    // `nointegration:test` - Run all tests, except integration
-    testOptions in CromwellNoIntegrationTest := (testOptions in AllTests).value ++ Seq(DontUseCromwellIntegrationTaggedTests, DontUseGcsIntegrationTaggedTests, DontUsePostMVPTaggedTests),
-    // `dbms:test` - Run database management tests.
-    testOptions in DbmsTest := (testOptions in AllTests).value ++ Seq(UseDbmsTaggedTests),
-    // Add scalameter as a test framework in the CromwellBenchmarkTest scope
-    testFrameworks in CromwellBenchmarkTest += new TestFramework("org.scalameter.ScalaMeterFramework"),
-    // Don't execute benchmarks in parallel
-    parallelExecution in CromwellBenchmarkTest := false
+    AllTests / testOptions := (Test / testOptions).value.diff(filterTestArgs),
+    // Reduce the load on SBT by only searching for ScalaTest specs excluding others like JUnit and ScalaCheck
+    testFrameworks := List(TestFrameworks.ScalaTest),
+    // Until we move away from Travis do not execute ANY tests in parallel (see also Settings.sharedSettings)
+    Test / parallelExecution := false,
+    // Since parallelExecution is off do not buffer test results
+    Test / logBuffered := false,
+    // Make sure no secrets are committed to git
+    minnieKenny := {
+      val log = streams.value.log
+      val args = spaceDelimited("<arg>").parsed
+      minnieKennySingleRunner.runOnce(log, args)
+    },
+    Test / test := {
+      minnieKenny.toTask("").value
+      (Test / test).value
+    }
   )
-  /*
-    TODO: This syntax of test in (NoTests, assembly) isn't correct
 
-    Trying to get:
+  private val integrationTestSettings = List(
+    libraryDependencies ++= testDependencies.map(_ % IntegrationTest)
+  ) ++ itSettings
 
-      sbt notests:assembly
+  def addTestSettings(project: Project) =
+    project
+      .settings(testSettings)
+      .configs(AllTests)
+      .settings(inConfig(AllTests)(Defaults.testTasks): _*)
 
-    To be the same as:
-
-      sbt 'set test in assembly := {}' assembly
-
-    For now, one must use the more verbose command line until someone can crack sbt's custom configs/tasks/scopes for the
-    assembly plugin:
-
-      http://www.scala-sbt.org/0.13/tutorial/Scopes.html
-   */
-  //test in (NoTests, assembly) := {}
-
-  // Also tried
-  //test in (NoTests, assemblyPackageDependency) := {}
-  //test in (NoTests, assemblyPackageScala) := {}
-
-  implicit class ProjectTestSettings(val project: Project) extends AnyVal {
-    def withTestSettings: Project = project
-      .configs(AllTests).settings(inConfig(AllTests)(Defaults.testTasks): _*)
-      .configs(DockerTest).settings(inConfig(DockerTest)(Defaults.testTasks): _*)
-      .configs(NoDockerTest).settings(inConfig(NoDockerTest)(Defaults.testTasks): _*)
-      .configs(CromwellIntegrationTest).settings(inConfig(CromwellIntegrationTest)(Defaults.testTasks): _*)
-      .configs(CromwellBenchmarkTest).settings(inConfig(CromwellBenchmarkTest)(Defaults.testTasks): _*)
-      .configs(CromwellNoIntegrationTest).settings(inConfig(CromwellNoIntegrationTest)(Defaults.testTasks): _*)
-      .configs(DbmsTest).settings(inConfig(DbmsTest)(Defaults.testTasks): _*)
-  }
+  def addIntegrationTestSettings(project: Project) =
+    project
+      .settings(integrationTestSettings)
+      .configs(IntegrationTest)
 
 }

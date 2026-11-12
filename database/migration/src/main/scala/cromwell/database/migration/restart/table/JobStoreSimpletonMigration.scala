@@ -1,18 +1,18 @@
 package cromwell.database.migration.restart.table
 
-import cromwell.core.simpleton.WdlValueSimpleton._
+import cromwell.core.simpleton.WomValueSimpleton._
 import cromwell.database.migration.WdlTransformation._
 import liquibase.database.jvm.JdbcConnection
-import wdl4s.types.WdlType
-import wdl4s.values.WdlValue
-
+import wdl.draft2.model.types.WdlFlavoredWomType
+import wom.types.WomType
+import wom.values.WomValue
 
 class JobStoreSimpletonMigration extends AbstractRestartMigration {
   override val description = "WORKFLOW_EXECUTION + EXECUTION + SYMBOL + JOB_STORE -> JOB_STORE_RESULT_SIMPLETON"
 
   // GOTC (substituting COUNT(*) for the projection): 1 row in set (5.22 sec)
   private val QueryOutputsForDoneCallsInRunningWorkflows =
-  """
+    """
       SELECT
         js.JOB_STORE_ID,   -- 1
         s.NAME,            -- 2
@@ -49,20 +49,21 @@ class JobStoreSimpletonMigration extends AbstractRestartMigration {
 
     case class JobStoreSimpletonEntry(name: String, valueString: String, typeString: String)
 
-    def buildJobStoreSimpletonEntries(name: String, wdlValue: WdlValue, wdlType: WdlType) = Option(wdlValue) match {
-      case None => List(JobStoreSimpletonEntry(name, null, wdlType.toWdlString))
-      case Some(v) => wdlValue.simplify(name) map { s =>
-        JobStoreSimpletonEntry(s.simpletonKey, s.simpletonValue.valueString, s.simpletonValue.wdlType.toWdlString)
-      }
+    def buildJobStoreSimpletonEntries(name: String, womValue: WomValue, womType: WomType) = Option(womValue) match {
+      case None => List(JobStoreSimpletonEntry(name, null, womType.stableName))
+      case Some(_) =>
+        womValue.simplify(name) map { s =>
+          JobStoreSimpletonEntry(s.simpletonKey, s.simpletonValue.valueString, s.simpletonValue.womType.stableName)
+        }
     }
 
     while (results.next()) {
-      val wdlType = WdlType.fromWdlString(results.getString(4))
+      val womType = WdlFlavoredWomType.fromDisplayString(results.getString(4))
       val rawValue = results.getString(3)
       val inflated = inflate(rawValue).get
-      val wdlValue = coerceStringToWdl(inflated, wdlType)
+      val womValue = coerceStringToWdl(inflated, womType)
       val name = results.getString(2)
-      val jobStoreSimpletonEntry = buildJobStoreSimpletonEntries(name, wdlValue, wdlType)
+      val jobStoreSimpletonEntry = buildJobStoreSimpletonEntries(name, womValue, womType)
       jobStoreSimpletonEntry foreach { e =>
         insert.setInt(1, results.getInt(1))
         insert.setString(2, e.name)
@@ -73,5 +74,3 @@ class JobStoreSimpletonMigration extends AbstractRestartMigration {
     }
   }
 }
-
-

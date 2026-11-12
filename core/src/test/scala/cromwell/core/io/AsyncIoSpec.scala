@@ -1,32 +1,30 @@
 package cromwell.core.io
 
-import java.nio.file.{FileAlreadyExistsException, NoSuchFileException}
+import java.nio.file.NoSuchFileException
 import java.util.UUID
-
 import akka.actor.{Actor, ActorLogging, ActorRef}
 import akka.testkit.TestActorRef
-import cromwell.core.path.DefaultPathBuilder
-import cromwell.core.{SimpleIoActor, TestKitSuite}
-import org.scalatest.mockito.MockitoSugar
-import org.scalatest.{AsyncFlatSpecLike, Matchers}
+import cromwell.core.TestKitSuite
+import cromwell.core.callcaching.FileHashStrategy
+import cromwell.core.path.{DefaultPathBuilder, Path}
+import org.scalatest.flatspec.AsyncFlatSpecLike
+import org.scalatest.matchers.should.Matchers
 
-class AsyncIoSpec extends TestKitSuite with AsyncFlatSpecLike with Matchers with MockitoSugar {
+import scala.util.{Failure, Try}
+import scala.util.control.NoStackTrace
+
+class AsyncIoSpec extends TestKitSuite with AsyncFlatSpecLike with Matchers {
 
   behavior of "AsyncIoSpec"
-  
-  val simpleIoActor = system.actorOf(SimpleIoActor.props)
-  
-  override def afterAll() = {
-    system stop simpleIoActor
-    super.afterAll()
-  } 
-  
+
+  implicit val ioCommandBuilder: DefaultIoCommandBuilder.type = DefaultIoCommandBuilder
+
   it should "write asynchronously" in {
     val testActor = TestActorRef(new AsyncIoTestActor(simpleIoActor))
 
     val testPath = DefaultPathBuilder.createTempFile()
-    
-    testActor.underlyingActor.writeAsync(testPath, "hello", Seq.empty) map { _ =>
+
+    testActor.underlyingActor.asyncIo.writeAsync(testPath, "hello", Seq.empty) map { _ =>
       assert(testPath.contentAsString == "hello")
     }
   }
@@ -37,7 +35,7 @@ class AsyncIoSpec extends TestKitSuite with AsyncFlatSpecLike with Matchers with
     val testPath = DefaultPathBuilder.createTempFile()
     testPath.write("hello")
 
-    testActor.underlyingActor.contentAsStringAsync(testPath) map { result =>
+    testActor.underlyingActor.asyncIo.contentAsStringAsync(testPath, None, failOnOverflow = false) map { result =>
       assert(result == "hello")
     }
   }
@@ -48,7 +46,7 @@ class AsyncIoSpec extends TestKitSuite with AsyncFlatSpecLike with Matchers with
     val testPath = DefaultPathBuilder.createTempFile()
     testPath.write("hello")
 
-    testActor.underlyingActor.sizeAsync(testPath) map { size =>
+    testActor.underlyingActor.asyncIo.sizeAsync(testPath) map { size =>
       assert(size == 5)
     }
   }
@@ -59,7 +57,7 @@ class AsyncIoSpec extends TestKitSuite with AsyncFlatSpecLike with Matchers with
     val testPath = DefaultPathBuilder.createTempFile()
     testPath.write("hello")
 
-    testActor.underlyingActor.hashAsync(testPath) map { hash =>
+    testActor.underlyingActor.asyncIo.hashAsync(testPath, FileHashStrategy.Md5) map { hash =>
       assert(hash == "5D41402ABC4B2A76B9719D911017C592")
     }
   }
@@ -70,20 +68,16 @@ class AsyncIoSpec extends TestKitSuite with AsyncFlatSpecLike with Matchers with
     val testPath = DefaultPathBuilder.createTempFile()
     val testCopyPath = testPath.sibling(UUID.randomUUID().toString)
 
-    testActor.underlyingActor.copyAsync(testPath, testCopyPath) map { hash =>
+    testActor.underlyingActor.asyncIo.copyAsync(testPath, testCopyPath) map { _ =>
       assert(testCopyPath.exists)
     }
 
     testPath.write("new text")
-    
-    // Honor overwrite true
-    testActor.underlyingActor.copyAsync(testPath, testCopyPath, overwrite = true) map { hash =>
+
+    testActor.underlyingActor.asyncIo.copyAsync(testPath, testCopyPath) map { _ =>
       assert(testCopyPath.exists)
       assert(testCopyPath.contentAsString == "new text")
     }
-
-    // Honor overwrite false
-    recoverToSucceededIf[FileAlreadyExistsException] { testActor.underlyingActor.copyAsync(testPath, testCopyPath, overwrite = false) }
   }
 
   it should "delete asynchronously" in {
@@ -91,25 +85,46 @@ class AsyncIoSpec extends TestKitSuite with AsyncFlatSpecLike with Matchers with
 
     val testPath = DefaultPathBuilder.createTempFile()
 
-    testActor.underlyingActor.deleteAsync(testPath) map { _ =>
+    testActor.underlyingActor.asyncIo.deleteAsync(testPath) map { _ =>
       assert(!testPath.exists)
     }
 
     // Honor swallow exception true
-    testActor.underlyingActor.deleteAsync(testPath, swallowIoExceptions = true) map { _ =>
+    testActor.underlyingActor.asyncIo.deleteAsync(testPath, swallowIoExceptions = true) map { _ =>
       assert(!testPath.exists)
     }
 
     // Honor swallow exception false
-    recoverToSucceededIf[NoSuchFileException] { testActor.underlyingActor.deleteAsync(testPath, swallowIoExceptions = false) }
+    // noinspection RedundantDefaultArgument
+    recoverToSucceededIf[NoSuchFileException] {
+      testActor.underlyingActor.asyncIo.deleteAsync(testPath, swallowIoExceptions = false)
+    }
   }
 
-  private class AsyncIoTestActor(override val ioActor: ActorRef) extends Actor with ActorLogging with AsyncIo with DefaultIoCommandBuilder {
+  it should "handle command creation errors asynchronously" in {
+    val partialIoCommandBuilder = new PartialIoCommandBuilder {
+      override def existsCommand: PartialFunction[Path, Try[IoExistsCommand]] = { case _ =>
+        Failure(new Exception("everything's fine, I am an expected exists fail") with NoStackTrace)
+      }
+    }
+    val testActor =
+      TestActorRef(new AsyncIoTestActor(simpleIoActor, new IoCommandBuilder(List(partialIoCommandBuilder))))
 
-    context.become(ioReceive orElse receive)
+    val testPath = DefaultPathBuilder.createTempFile()
+    testPath.write("hello")
 
-    override def receive: Receive = {
-      case _ =>
+    testActor.underlyingActor.asyncIo.existsAsync(testPath).failed map { throwable =>
+      assert(throwable.getMessage == "everything's fine, I am an expected exists fail")
+    }
+  }
+
+  private class AsyncIoTestActor(override val ioActor: ActorRef,
+                                 override val ioCommandBuilder: IoCommandBuilder = DefaultIoCommandBuilder
+  ) extends Actor
+      with ActorLogging
+      with AsyncIoActorClient {
+
+    override def receive: Receive = { case _ =>
     }
   }
 

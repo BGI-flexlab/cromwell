@@ -7,7 +7,7 @@ import ch.qos.logback.classic.Level
 import ch.qos.logback.classic.pattern.ThrowableProxyConverter
 import ch.qos.logback.classic.spi.ILoggingEvent
 import ch.qos.logback.core.LayoutBase
-import lenthall.util.TerminalUtil
+import common.util.TerminalUtil
 
 object TerminalLayout {
   val Converter = new ThrowableProxyConverter
@@ -20,15 +20,14 @@ object TerminalLayout {
   }
 
   implicit class ColorString(msg: String) {
-    def colorizeUuids: String = {
-      "UUID\\((.*?)\\)".r.findAllMatchIn(msg).foldLeft(msg) {
-        case (l, r) =>
-          val color = if (Option(System.getProperty("RAINBOW_UUID")).isDefined)
-            Math.abs(17 * r.group(1).substring(0,8).map(_.toInt).product) % 209 + 22
+    def colorizeUuids: String =
+      "UUID\\((.*?)\\)".r.findAllMatchIn(msg).foldLeft(msg) { case (l, r) =>
+        val color =
+          if (Option(System.getProperty("RAINBOW_UUID")).isDefined)
+            Math.abs(17 * r.group(1).substring(0, 8).map(_.toInt).product) % 209 + 22
           else 2
-          l.replace(r.group(0), TerminalUtil.highlight(color, r.group(1)))
+        l.replace(r.group(0), TerminalUtil.highlight(color, r.group(1)))
       }
-    }
     def colorizeCommand: String = msg.replaceAll("`([^`]*?)`", TerminalUtil.highlight(5, "$1"))
   }
 }

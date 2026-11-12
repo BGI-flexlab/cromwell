@@ -1,0 +1,13 @@
+name: readFromCacheFalse
+testFormat: runtwiceexpectingnocallcaching
+tags: [slowpoke]
+
+files {
+  workflow: readFromCacheFalse/readFromCache.wdl
+  options: readFromCacheFalse/readFromCache.options
+}
+
+metadata {
+  workflowName: readFromCache
+  status: Succeeded
+}

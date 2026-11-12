@@ -2,13 +2,13 @@ package cromwell.backend.standard
 
 import akka.actor.{Actor, ActorRef}
 import cromwell.backend._
-import cromwell.backend.standard.callcaching.JobCachingActorHelper
 import cromwell.backend.io.{JobPaths, WorkflowPaths}
-import cromwell.backend.validation.{RuntimeAttributesValidation, ValidatedRuntimeAttributes}
+import cromwell.backend.standard.callcaching.JobCachingActorHelper
+import cromwell.backend.validation.{Containers, RuntimeAttributesValidation, ValidatedRuntimeAttributes}
 import cromwell.core.logging.JobLogging
 import cromwell.core.path.Path
 import cromwell.services.metadata.CallMetadataKeys
-import wdl4s.TaskCall
+import wom.graph.CommandCallNode
 
 import scala.util.Try
 
@@ -46,15 +46,18 @@ trait StandardCachingActorHelper extends JobCachingActorHelper {
     */
   lazy val workflowDescriptor: BackendWorkflowDescriptor = jobDescriptor.workflowDescriptor
 
-  lazy val call: TaskCall = jobDescriptor.key.call
+  lazy val call: CommandCallNode = jobDescriptor.key.call
 
-  lazy val standardInitializationData: StandardInitializationData = BackendInitializationData.
-    as[StandardInitializationData](backendInitializationDataOption)
+  lazy val standardInitializationData: StandardInitializationData =
+    BackendInitializationData.as[StandardInitializationData](backendInitializationDataOption)
 
   lazy val validatedRuntimeAttributes: ValidatedRuntimeAttributes = {
     val builder = standardInitializationData.runtimeAttributesBuilder
     builder.build(jobDescriptor.runtimeAttributes, jobLogger)
   }
+
+  lazy val isDockerRun: Boolean =
+    Containers.extractContainerOption(validatedRuntimeAttributes).isDefined
 
   /**
     * Returns the paths to the job.
@@ -75,11 +78,11 @@ trait StandardCachingActorHelper extends JobCachingActorHelper {
 
     val fileMetadata = jobPaths.metadataPaths
 
-    runtimeAttributesMetadata ++ fileMetadata ++ nonStandardMetadata
+    nonStandardMetadata ++ runtimeAttributesMetadata ++ fileMetadata
   }
 
   /**
-    * Returns any custom medatata for the backend.
+    * Returns any custom metadata for the backend.
     *
     * @return any custom metadata for the backend.
     */

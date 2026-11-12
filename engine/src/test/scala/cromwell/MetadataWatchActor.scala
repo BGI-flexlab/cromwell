@@ -2,10 +2,11 @@ package cromwell
 
 import akka.actor.{Actor, ActorLogging, Props}
 import cromwell.core.Dispatcher.EngineDispatcher
-import cromwell.services.metadata.{MetadataEvent, MetadataJobKey, MetadataString, MetadataValue}
-import cromwell.services.metadata.MetadataService.PutMetadataAction
+import cromwell.services.metadata.MetadataService.{MetadataWriteSuccess, PutMetadataAction, PutMetadataActionAndRespond}
 import MetadataWatchActor._
-import cromwell.services.keyvalue.KeyValueServiceActor.{KvPut, KvPutSuccess}
+import cromwell.services.instrumentation.InstrumentationService.InstrumentationServiceMessage
+import cromwell.services.keyvalue.KeyValueServiceActor._
+import cromwell.services.metadata.{MetadataEvent, MetadataJobKey, MetadataString, MetadataValue}
 
 import scala.concurrent.Promise
 
@@ -16,31 +17,40 @@ final case class MetadataWatchActor(promise: Promise[Unit], matchers: Matcher*) 
 
   var unsatisfiedMatchers = matchers
 
+  def tryMatchingEvents(events: Iterable[MetadataEvent]) = {
+    unsatisfiedMatchers = unsatisfiedMatchers.filterNot(m => m.matches(events))
+    if (unsatisfiedMatchers.isEmpty) {
+      promise.trySuccess(())
+      ()
+    }
+  }
+
   override def receive = {
-    case PutMetadataAction(events) if unsatisfiedMatchers.nonEmpty =>
-      unsatisfiedMatchers = unsatisfiedMatchers.filterNot { m => m.matches(events) }
-      if (unsatisfiedMatchers.isEmpty) {
-        promise.trySuccess(())
-        ()
-      }
-    case PutMetadataAction(_) => // Superfluous message. Ignore
+    case PutMetadataAction(events, _) =>
+      if (unsatisfiedMatchers.nonEmpty) tryMatchingEvents(events)
+    case PutMetadataActionAndRespond(events, replyTo, _) =>
+      if (unsatisfiedMatchers.nonEmpty) tryMatchingEvents(events)
+      replyTo ! MetadataWriteSuccess(events)
     // Because the MetadataWatchActor is sometimes used in place of the ServiceRegistryActor, this allows WFs to continue:
-    case kvPut: KvPut => sender ! KvPutSuccess(kvPut)
-    case other => throw new Exception(s"Invalid message to MetadataWatchActor: $other")
+    case kvGet: KvGet => sender() ! KvKeyLookupFailed(kvGet)
+    case kvPut: KvPut => sender() ! KvPutSuccess(kvPut)
+    case _: InstrumentationServiceMessage => // No-op, just ignore
+    case other => log.error(s"Invalid message to MetadataWatchActor: $other")
   }
 }
 
 object MetadataWatchActor {
 
-  def props(promise: Promise[Unit], matchers: Matcher*): Props = Props(MetadataWatchActor(promise, matchers: _*)).withDispatcher(EngineDispatcher)
+  def props(promise: Promise[Unit], matchers: Matcher*): Props =
+    Props(MetadataWatchActor(promise, matchers: _*)).withDispatcher(EngineDispatcher)
 
   trait Matcher {
     private var _fullEventList: List[MetadataEvent] = List.empty
-    final def matches(events: Traversable[MetadataEvent]): Boolean = {
+    final def matches(events: Iterable[MetadataEvent]): Boolean = {
       _fullEventList ++= events
       _matches(events)
     }
-    def _matches(events: Traversable[MetadataEvent]): Boolean
+    def _matches(events: Iterable[MetadataEvent]): Boolean
     private var _nearMisses: List[String] = List.empty
     private def addNearMissInfo(miss: String) = _nearMisses :+= miss
     def nearMissInformation = _nearMisses
@@ -48,7 +58,8 @@ object MetadataWatchActor {
 
     def checkMetadataValueContains(key: String, actual: MetadataValue, expected: String): Boolean = {
       val result = actual.value.contains(expected)
-      if (!result) addNearMissInfo(s"Key $key had unexpected value.\nActual value: ${actual.value}\n\nDid not contain: $expected")
+      if (!result)
+        addNearMissInfo(s"Key $key had unexpected value.\nActual value: ${actual.value}\n\nDid not contain: $expected")
       result
     }
   }
@@ -58,20 +69,28 @@ object MetadataWatchActor {
     case None => false
   }
 
-  final case class JobKeyMetadataKeyAndValueContainStringMatcher(jobKeyCheck: Option[MetadataJobKey] => Boolean, key: String, value: String) extends Matcher {
-    def _matches(events: Traversable[MetadataEvent]): Boolean = {
-      events.exists(e => e.key.key.contains(key) && jobKeyCheck(e.key.jobKey) && e.value.exists { v => v.valueType == MetadataString && checkMetadataValueContains(e.key.key, v, value) })
-    }
+  final case class JobKeyMetadataKeyAndValueContainStringMatcher(jobKeyCheck: Option[MetadataJobKey] => Boolean,
+                                                                 key: String,
+                                                                 value: String
+  ) extends Matcher {
+    def _matches(events: Iterable[MetadataEvent]): Boolean =
+      events.exists(e =>
+        e.key.key.contains(key) && jobKeyCheck(e.key.jobKey) && e.value.exists { v =>
+          v.valueType == MetadataString && checkMetadataValueContains(e.key.key, v, value)
+        }
+      )
   }
 
   abstract class KeyMatchesRegexAndValueContainsStringMatcher(keyTemplate: String, value: String) extends Matcher {
     val templateRegex = keyTemplate.r
-    def _matches(events: Traversable[MetadataEvent]): Boolean = {
-      events.exists(e => templateRegex.findFirstIn(e.key.key).isDefined &&
-        e.value.exists { v => checkMetadataValueContains(e.key.key, v, value) })
-    }
+    def _matches(events: Iterable[MetadataEvent]): Boolean =
+      events.exists(e =>
+        templateRegex.findFirstIn(e.key.key).isDefined &&
+          e.value.exists(v => checkMetadataValueContains(e.key.key, v, value))
+      )
   }
 
   val failurePattern = """failures\[\d*\].*\:message"""
-  final case class FailureMatcher(value: String) extends KeyMatchesRegexAndValueContainsStringMatcher(failurePattern, value) { }
+  final case class FailureMatcher(value: String)
+      extends KeyMatchesRegexAndValueContainsStringMatcher(failurePattern, value) {}
 }

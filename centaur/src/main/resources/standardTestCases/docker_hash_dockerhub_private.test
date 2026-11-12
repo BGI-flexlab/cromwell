@@ -1,0 +1,15 @@
+name: docker_hash_dockerhub_private
+testFormat: workflowsuccess
+backendsMode: any
+backends: [GCPBATCH]
+
+files {
+  workflow: docker_hash/docker_hash_dockerhub_private.wdl
+  # https://github.com/broadinstitute/cromwell/issues/3998
+  options: docker_hash/docker_hash.options
+}
+
+metadata {
+  "calls.docker_hash_dockerhub_private.dockerhub.runtimeAttributes.docker": "broadinstitute/cloud-cromwell:2024-08-31",
+  "calls.docker_hash_dockerhub_private.dockerhub.dockerImageUsed": "broadinstitute/cloud-cromwell@sha256:49ba8c8c2821c5b894a5bcff0a7873d6c58df7a03c45ee7c3cda159795f6e80f"
+}

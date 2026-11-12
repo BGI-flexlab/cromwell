@@ -1,98 +1,176 @@
 package cromwell.backend
 
-import cromwell.backend.BackendJobExecutionActor.{BackendJobExecutionResponse, JobFailedNonRetryableResponse, JobFailedRetryableResponse, JobSucceededResponse}
+import _root_.wdl.draft2.model._
+import _root_.wdl.transforms.draft2.wdlom2wom.WdlDraft2WomExecutableMakers._
+import common.exception.AggregatedException
+import cromwell.backend.BackendJobExecutionActor.{
+  BackendJobExecutionResponse,
+  JobFailedNonRetryableResponse,
+  JobFailedRetryableResponse,
+  JobSucceededResponse
+}
 import cromwell.backend.io.TestWorkflows._
 import cromwell.core.callcaching.NoDocker
 import cromwell.core.labels.Labels
-import cromwell.core.{WorkflowId, WorkflowOptions}
-import lenthall.exception.AggregatedException
-import org.scalatest.Matchers
-import org.scalatest.concurrent.ScalaFutures
+import cromwell.core.{HogGroup, WorkflowId, WorkflowOptions}
+import org.scalatest.concurrent.{ScalaFutures, ScaledTimeSpans}
+import org.scalatest.matchers.should.Matchers
 import org.scalatest.time.{Millis, Seconds, Span}
-import org.specs2.mock.Mockito
 import spray.json.{JsObject, JsValue}
-import wdl4s._
-import wdl4s.expression.NoFunctions
-import wdl4s.values.WdlValue
+import wom.callable.Callable.{InputDefinition, RequiredInputDefinition}
+import wom.core.WorkflowSource
+import wom.expression.{NoIoFunctionSet, WomExpression}
+import wom.graph.GraphNodePort.OutputPort
+import wom.graph.{CommandCallNode, OptionalGraphInputNodeWithDefault}
+import wom.transforms.WomExecutableMaker.ops._
+import wom.values.WomValue
 
-trait BackendSpec extends ScalaFutures with Matchers with Mockito {
+trait BackendSpec extends ScalaFutures with Matchers with ScaledTimeSpans {
 
-  implicit val defaultPatience = PatienceConfig(timeout = Span(10, Seconds), interval = Span(500, Millis))
+  implicit val defaultPatience: PatienceConfig =
+    PatienceConfig(timeout = scaled(Span(10, Seconds)), interval = Span(500, Millis))
 
-  def testWorkflow(workflow: TestWorkflow, backend: BackendJobExecutionActor, inputs: Map[String, WdlValue] = Map.empty) = {
+  def testWorkflow(workflow: TestWorkflow, backend: BackendJobExecutionActor): Unit =
     executeJobAndAssertOutputs(backend, workflow.expectedResponse)
-  }
 
-  def buildWorkflowDescriptor(workflowSource: WdlSource,
-                              inputs: Map[String, WdlValue] = Map.empty,
+  def buildWorkflowDescriptor(workflowSource: WorkflowSource,
+                              inputFileAsJson: Option[String],
                               options: WorkflowOptions = WorkflowOptions(JsObject(Map.empty[String, JsValue])),
-                              runtime: String = "") = {
+                              runtime: String = "",
+                              labels: Labels = Labels.empty
+  ): BackendWorkflowDescriptor = {
+    val wdlNamespace =
+      WdlNamespaceWithWorkflow.load(workflowSource.replaceAll("RUNTIME", runtime), Seq.empty[Draft2ImportResolver]).get
+    val executable = wdlNamespace.toWomExecutable(inputFileAsJson, NoIoFunctionSet, strictValidation = true) match {
+      case Left(errors) => fail(s"Fail to build wom executable: ${errors.toList.mkString(", ")}")
+      case Right(e) => e
+    }
+
     BackendWorkflowDescriptor(
       WorkflowId.randomId(),
-      WdlNamespaceWithWorkflow.load(workflowSource.replaceAll("RUNTIME", runtime), Seq.empty[ImportResolver]).get.workflow, // Get ok, this is a test!
-      inputs,
+      executable.entryPoint,
+      executable.resolvedExecutableInputs.flatMap { case (port, v) => v.select[WomValue] map { port -> _ } },
       options,
-      Labels.empty
+      labels,
+      HogGroup("foo"),
+      List.empty,
+      None
     )
   }
 
-  def fqnMapToDeclarationMap(m: Map[String, WdlValue]): Map[Declaration, WdlValue] = {
-    m map {
-      case (fqn, v) =>
-        val mockDeclaration = mock[Declaration]
-        mockDeclaration.fullyQualifiedName returns fqn
-        mockDeclaration.unqualifiedName returns fqn.split('.').lastOption.getOrElse(fqn)
-        mockDeclaration -> v
+  def buildWdlWorkflowDescriptor(workflowSource: WorkflowSource,
+                                 inputFileAsJson: Option[String] = None,
+                                 options: WorkflowOptions = WorkflowOptions(JsObject(Map.empty[String, JsValue])),
+                                 runtime: String = "",
+                                 labels: Labels = Labels.empty
+  ): BackendWorkflowDescriptor =
+    buildWorkflowDescriptor(workflowSource, inputFileAsJson, options, runtime, labels)
+
+  def fqnWdlMapToDeclarationMap(m: Map[String, WomValue]): Map[InputDefinition, WomValue] =
+    m map { case (fqn, v) =>
+      val mockDeclaration = RequiredInputDefinition(fqn, v.womType)
+      mockDeclaration -> v
     }
-  }
+
+  def fqnMapToDeclarationMap(m: Map[OutputPort, WomValue]): Map[InputDefinition, WomValue] =
+    m map { case (outputPort, womValue) =>
+      RequiredInputDefinition(outputPort.name, womValue.womType) -> womValue
+    }
 
   def jobDescriptorFromSingleCallWorkflow(workflowDescriptor: BackendWorkflowDescriptor,
-                                          inputs: Map[String, WdlValue],
+                                          inputs: Map[String, WomValue],
                                           options: WorkflowOptions,
-                                          runtimeAttributeDefinitions: Set[RuntimeAttributeDefinition]): BackendJobDescriptor = {
-    val call = workflowDescriptor.workflow.taskCalls.head
+                                          runtimeAttributeDefinitions: Set[RuntimeAttributeDefinition]
+  ): BackendJobDescriptor = {
+    val call = workflowDescriptor.callable.graph.nodes.collectFirst { case t: CommandCallNode => t }.get
     val jobKey = BackendJobDescriptorKey(call, None, 1)
-    val inputDeclarations = call.evaluateTaskInputs(inputs, NoFunctions).get // .get is ok because this is a test
-    val evaluatedAttributes = RuntimeAttributeDefinition.evaluateRuntimeAttributes(call.task.runtimeAttributes, NoFunctions, inputDeclarations).get // .get is OK here because this is a test
-    val runtimeAttributes = RuntimeAttributeDefinition.addDefaultsToAttributes(runtimeAttributeDefinitions, options)(evaluatedAttributes)
-    BackendJobDescriptor(workflowDescriptor, jobKey, runtimeAttributes, inputDeclarations, NoDocker, Map.empty)
+
+    val inputDeclarations: Map[InputDefinition, WomValue] = call.inputDefinitionMappings.map {
+      case (inputDef, resolved) =>
+        inputDef ->
+          resolved
+            .select[WomValue]
+            .orElse(
+              resolved
+                .select[WomExpression]
+                .map(
+                  _.evaluateValue(inputs, NoIoFunctionSet).getOrElse(fail("Can't evaluate input"))
+                )
+            )
+            .orElse(
+              resolved.select[OutputPort] flatMap {
+                case known if workflowDescriptor.knownValues.contains(known) =>
+                  Option(workflowDescriptor.knownValues(known))
+                case hasDefault if hasDefault.graphNode.isInstanceOf[OptionalGraphInputNodeWithDefault] =>
+                  Option(
+                    hasDefault.graphNode
+                      .asInstanceOf[OptionalGraphInputNodeWithDefault]
+                      .default
+                      .evaluateValue(inputs, NoIoFunctionSet)
+                      .getOrElse(fail("Can't evaluate input"))
+                  )
+                case _ => None
+              }
+            )
+            .getOrElse {
+              inputs(inputDef.name)
+            }
+    }.toMap
+    val evaluatedAttributes = RuntimeAttributeDefinition
+      .evaluateRuntimeAttributes(call.callable.runtimeAttributes, NoIoFunctionSet, Map.empty)
+      .getOrElse(fail("Failed to evaluate runtime attributes")) // .get is OK here because this is a test
+    val runtimeAttributes =
+      RuntimeAttributeDefinition.addDefaultsToAttributes(runtimeAttributeDefinitions, options)(evaluatedAttributes)
+    BackendJobDescriptor(workflowDescriptor, jobKey, runtimeAttributes, inputDeclarations, NoDocker, None, Map.empty)
   }
 
-  def jobDescriptorFromSingleCallWorkflow(wdl: WdlSource,
+  def jobDescriptorFromSingleCallWorkflow(wdl: WorkflowSource,
                                           options: WorkflowOptions,
-                                          runtimeAttributeDefinitions: Set[RuntimeAttributeDefinition]): BackendJobDescriptor = {
-    val workflowDescriptor = buildWorkflowDescriptor(wdl)
-    val call = workflowDescriptor.workflow.taskCalls.head
+                                          runtimeAttributeDefinitions: Set[RuntimeAttributeDefinition]
+  ): BackendJobDescriptor = {
+    val workflowDescriptor = buildWdlWorkflowDescriptor(wdl)
+    val call = workflowDescriptor.callable.graph.nodes.collectFirst { case t: CommandCallNode => t }.get
     val jobKey = BackendJobDescriptorKey(call, None, 1)
     val inputDeclarations = fqnMapToDeclarationMap(workflowDescriptor.knownValues)
-    val evaluatedAttributes = RuntimeAttributeDefinition.evaluateRuntimeAttributes(call.task.runtimeAttributes, NoFunctions, inputDeclarations).get // .get is OK here because this is a test
-    val runtimeAttributes = RuntimeAttributeDefinition.addDefaultsToAttributes(runtimeAttributeDefinitions, options)(evaluatedAttributes)
-    BackendJobDescriptor(workflowDescriptor, jobKey, runtimeAttributes, inputDeclarations, NoDocker, Map.empty)
+    val evaluatedAttributes = RuntimeAttributeDefinition
+      .evaluateRuntimeAttributes(call.callable.runtimeAttributes, NoIoFunctionSet, inputDeclarations)
+      .getOrElse(fail("Failed to evaluate runtime attributes")) // .get is OK here because this is a test
+    val runtimeAttributes =
+      RuntimeAttributeDefinition.addDefaultsToAttributes(runtimeAttributeDefinitions, options)(evaluatedAttributes)
+    BackendJobDescriptor(workflowDescriptor, jobKey, runtimeAttributes, inputDeclarations, NoDocker, None, Map.empty)
   }
 
-  def jobDescriptorFromSingleCallWorkflow(wdl: WdlSource,
+  def jobDescriptorFromSingleCallWorkflow(wdl: WorkflowSource,
                                           runtime: String,
                                           attempt: Int,
                                           options: WorkflowOptions,
-                                          runtimeAttributeDefinitions: Set[RuntimeAttributeDefinition]): BackendJobDescriptor = {
-    val workflowDescriptor = buildWorkflowDescriptor(wdl, runtime = runtime)
-    val call = workflowDescriptor.workflow.taskCalls.head
+                                          runtimeAttributeDefinitions: Set[RuntimeAttributeDefinition]
+  ): BackendJobDescriptor = {
+    val workflowDescriptor = buildWdlWorkflowDescriptor(wdl, runtime = runtime)
+    val call = workflowDescriptor.callable.graph.nodes.collectFirst { case t: CommandCallNode => t }.get
     val jobKey = BackendJobDescriptorKey(call, None, attempt)
     val inputDeclarations = fqnMapToDeclarationMap(workflowDescriptor.knownValues)
-    val evaluatedAttributes = RuntimeAttributeDefinition.evaluateRuntimeAttributes(call.task.runtimeAttributes, NoFunctions, inputDeclarations).get // .get is OK here because this is a test
-    val runtimeAttributes = RuntimeAttributeDefinition.addDefaultsToAttributes(runtimeAttributeDefinitions, options)(evaluatedAttributes)
-    BackendJobDescriptor(workflowDescriptor, jobKey, runtimeAttributes, inputDeclarations, NoDocker, Map.empty)
+    val evaluatedAttributes = RuntimeAttributeDefinition
+      .evaluateRuntimeAttributes(call.callable.runtimeAttributes, NoIoFunctionSet, inputDeclarations)
+      .getOrElse(fail("Failed to evaluate runtime attributes")) // .get is OK here because this is a test
+    val runtimeAttributes =
+      RuntimeAttributeDefinition.addDefaultsToAttributes(runtimeAttributeDefinitions, options)(evaluatedAttributes)
+    BackendJobDescriptor(workflowDescriptor, jobKey, runtimeAttributes, inputDeclarations, NoDocker, None, Map.empty)
   }
 
-  def assertResponse(executionResponse: BackendJobExecutionResponse, expectedResponse: BackendJobExecutionResponse) = {
+  def assertResponse(executionResponse: BackendJobExecutionResponse,
+                     expectedResponse: BackendJobExecutionResponse
+  ): Unit = {
     (executionResponse, expectedResponse) match {
-      case (JobSucceededResponse(_, _, responseOutputs, _, _, _), JobSucceededResponse(_, _, expectedOutputs, _, _, _)) =>
-        responseOutputs.size shouldBe expectedOutputs.size
-        responseOutputs foreach {
-          case (fqn, out) =>
-            val expectedOut = expectedOutputs.get(fqn)
-            expectedOut.isDefined shouldBe true
-            expectedOut.get.wdlValue.valueString shouldBe out.wdlValue.valueString
+      case (JobSucceededResponse(_, _, responseOutputs, _, _, _, _),
+            JobSucceededResponse(_, _, expectedOutputs, _, _, _, _)
+          ) =>
+        responseOutputs.outputs.size shouldBe expectedOutputs.outputs.size
+        responseOutputs.outputs foreach { case (fqn, out) =>
+          val expectedOut = expectedOutputs.outputs.collectFirst { case (p, v) if p.name == fqn.name => v }
+          expectedOut
+            .getOrElse(fail(s"Output ${fqn.name} not found in ${expectedOutputs.outputs.map(_._1.name)}"))
+            .valueString shouldBe out.valueString
         }
       case (JobFailedNonRetryableResponse(_, failure, _), JobFailedNonRetryableResponse(_, expectedFailure, _)) =>
         failure.getClass shouldBe expectedFailure.getClass
@@ -102,28 +180,26 @@ trait BackendSpec extends ScalaFutures with Matchers with Mockito {
       case (response, expectation) =>
         fail(s"Execution response $response wasn't conform to expectation $expectation")
     }
+    ()
   }
 
   private def concatenateCauseMessages(t: Throwable): String = t match {
     case null => ""
-    case ae: AggregatedException => ae.getMessage + " " + ae.throwables.map(innerT => concatenateCauseMessages(innerT.getCause)).mkString("\n")
+    case ae: AggregatedException =>
+      ae.getMessage + " " + ae.throwables.map(innerT => concatenateCauseMessages(innerT.getCause)).mkString("\n")
     case other: Throwable => other.getMessage + concatenateCauseMessages(t.getCause)
   }
 
-  def executeJobAndAssertOutputs(backend: BackendJobExecutionActor, expectedResponse: BackendJobExecutionResponse) = {
+  def executeJobAndAssertOutputs(backend: BackendJobExecutionActor,
+                                 expectedResponse: BackendJobExecutionResponse
+  ): Unit =
     whenReady(backend.execute) { executionResponse =>
       assertResponse(executionResponse, expectedResponse)
     }
-  }
 
   def firstJobDescriptorKey(workflowDescriptor: BackendWorkflowDescriptor): BackendJobDescriptorKey = {
-    val call = workflowDescriptor.workflow.taskCalls.head
+    val call = workflowDescriptor.callable.graph.nodes.collectFirst { case t: CommandCallNode => t }.get
     BackendJobDescriptorKey(call, None, 1)
-  }
-
-  def firstJobDescriptor(workflowDescriptor: BackendWorkflowDescriptor,
-                         inputs: Map[String, WdlValue] = Map.empty) = {
-    BackendJobDescriptor(workflowDescriptor, firstJobDescriptorKey(workflowDescriptor), Map.empty, fqnMapToDeclarationMap(inputs), NoDocker, Map.empty)
   }
 }
 

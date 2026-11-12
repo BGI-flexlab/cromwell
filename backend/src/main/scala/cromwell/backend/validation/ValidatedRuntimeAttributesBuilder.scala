@@ -3,11 +3,14 @@ package cromwell.backend.validation
 import cats.data.Validated._
 import cats.instances.list._
 import cromwell.backend.RuntimeAttributeDefinition
-import lenthall.exception.MessageAggregation
-import lenthall.validation.ErrorOr._
+import common.exception.MessageAggregation
+import common.validation.ErrorOr._
 import org.slf4j.Logger
-import wdl4s.types.WdlType
-import wdl4s.values.WdlValue
+import wom.expression.WomExpression
+import wom.types.WomType
+import wom.values.WomValue
+
+import scala.util.control.NoStackTrace
 
 final case class ValidatedRuntimeAttributes(attributes: Map[String, Any])
 
@@ -35,43 +38,40 @@ trait ValidatedRuntimeAttributesBuilder {
   /**
     * Returns validators suitable for BackendWorkflowInitializationActor.runtimeAttributeValidators.
     */
-  final lazy val validatorMap: Map[String, (Option[WdlValue]) => Boolean] = {
-    validations.map(validation =>
-      validation.key -> validation.validateOptionalExpression _
-    ).toMap
-  }
+  final lazy val validatorMap: Map[String, Option[WomExpression] => Boolean] =
+    validations.map(validation => validation.key -> validation.validateOptionalWomExpression _).toMap
 
   /**
     * Returns a map of coercions suitable for RuntimeAttributesDefault.workflowOptionsDefault.
     */
-  final lazy val coercionMap: Map[String, Traversable[WdlType]] = {
+  final lazy val coercionMap: Map[String, Iterable[WomType]] =
     validations.map(validation => validation.key -> validation.coercion).toMap
-  }
 
   def unsupportedKeys(keys: Seq[String]): Seq[String] = keys.diff(validationKeys)
 
   private lazy val validationKeys = validations.map(_.key)
 
-  def build(attrs: Map[String, WdlValue], logger: Logger): ValidatedRuntimeAttributes = {
+  def build(attrs: Map[String, WomValue], logger: Logger): ValidatedRuntimeAttributes = {
     RuntimeAttributesValidation.warnUnrecognized(attrs.keySet, validationKeys.toSet, logger)
 
     val runtimeAttributesErrorOr: ErrorOr[ValidatedRuntimeAttributes] = validate(attrs)
     runtimeAttributesErrorOr match {
       case Valid(runtimeAttributes) => runtimeAttributes
-      case Invalid(nel) => throw new RuntimeException with MessageAggregation {
-        override def exceptionContext: String = "Runtime attribute validation failed"
+      case Invalid(nel) =>
+        throw new RuntimeException with MessageAggregation with NoStackTrace {
+          override def exceptionContext: String = "Runtime attribute validation failed"
 
-        override def errorMessages: Traversable[String] = nel.toList
-      }
+          override def errorMessages: Iterable[String] = nel.toList
+        }
     }
   }
 
-  private def validate(values: Map[String, WdlValue]): ErrorOr[ValidatedRuntimeAttributes] = {
+  private def validate(values: Map[String, WomValue]): ErrorOr[ValidatedRuntimeAttributes] = {
     val listOfKeysToErrorOrAnys: List[(String, ErrorOr[Any])] =
       validations.map(validation => validation.key -> validation.validate(values)).toList
 
-    val listOfErrorOrKeysToAnys: List[ErrorOr[(String, Any)]] = listOfKeysToErrorOrAnys map {
-      case (key, errorOrAny) => errorOrAny map { any => (key, any) }
+    val listOfErrorOrKeysToAnys: List[ErrorOr[(String, Any)]] = listOfKeysToErrorOrAnys map { case (key, errorOrAny) =>
+      errorOrAny map { any => (key, any) }
     }
 
     import cats.syntax.traverse._

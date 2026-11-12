@@ -2,20 +2,23 @@ package cromwell.services.metadata
 
 import java.util.UUID
 
-import cromwell.core.WorkflowId
-import lenthall.exception.AggregatedException
+import common.assertion.CromwellTimeoutSpec
+import common.exception.AggregatedException
+import cromwell.core._
+import cromwell.services.metadata
 import org.scalactic.Equality
+import org.scalatest.flatspec.AnyFlatSpec
+import org.scalatest.matchers.should.Matchers
 import org.scalatest.prop.TableDrivenPropertyChecks
-import org.scalatest.{FlatSpec, Matchers}
-import wdl4s.types.{WdlArrayType, WdlMapType, WdlStringType}
-import wdl4s.values._
+import wom.types._
+import wom.values._
 
-class MetadataServiceSpec extends FlatSpec with Matchers with TableDrivenPropertyChecks {
+class MetadataServiceSpec extends AnyFlatSpec with CromwellTimeoutSpec with Matchers with TableDrivenPropertyChecks {
 
   behavior of "MetadataServiceSpec"
 
   // Discard timestamp when determining equality here
-  implicit val metadataEventEquality = new Equality[MetadataEvent] {
+  implicit val metadataEventEquality: Equality[MetadataEvent] = new Equality[MetadataEvent] {
     override def areEqual(a: MetadataEvent, b: Any): Boolean = b match {
       case bEvent: MetadataEvent =>
         a.key == bEvent.key && a.value == bEvent.value
@@ -23,56 +26,68 @@ class MetadataServiceSpec extends FlatSpec with Matchers with TableDrivenPropert
     }
   }
 
-  it should "convert a WdlArray to MetadataEvents" in {
+  it should "convert a WomArray to MetadataEvents" in {
     import MetadataService._
     val workflowId = WorkflowId.randomId()
-    val wdlArray = WdlArray(WdlArrayType(WdlStringType), Seq(WdlString("Hello"), WdlString("world!")))
-    val emptyWdlArray = WdlArray(WdlArrayType(WdlStringType), Seq.empty)
+    val womArray = WomArray(WomArrayType(WomStringType), Seq(WomString("Hello"), WomString("world!")))
+    val emptyWomArray = WomArray(WomArrayType(WomStringType), Seq.empty)
 
-    wdlValueToMetadataEvents(MetadataKey(workflowId, None, "root"), wdlArray).toList should contain theSameElementsInOrderAs List(
+    womValueToMetadataEvents(MetadataKey(workflowId, None, "root"),
+                             womArray
+    ).toList should contain theSameElementsInOrderAs List(
       MetadataEvent(MetadataKey(workflowId, None, "root[0]"), MetadataValue("Hello")),
       MetadataEvent(MetadataKey(workflowId, None, "root[1]"), MetadataValue("world!"))
     )
 
-    wdlValueToMetadataEvents(MetadataKey(workflowId, None, "root"), emptyWdlArray).toList should contain theSameElementsAs List(
+    womValueToMetadataEvents(MetadataKey(workflowId, None, "root"),
+                             emptyWomArray
+    ).toList should contain theSameElementsAs List(
       MetadataEvent.empty(MetadataKey(workflowId, None, "root[]"))
     )
   }
 
-  it should "convert a WdlMap to MetadataEvents" in {
+  it should "convert a WomMap to MetadataEvents" in {
     import MetadataService._
     val workflowId = WorkflowId.randomId()
-    val wdlArray = WdlMap(WdlMapType(WdlStringType, WdlStringType), Map(
-      WdlString("Hello") -> WdlString("world!"),
-      WdlString("Goodbye") -> WdlString("world!")
-    ))
-    val emptyWdlMap = WdlMap(WdlMapType(WdlStringType, WdlStringType), Map.empty)
+    val womMap = WomMap(WomMapType(WomStringType, WomStringType),
+                        Map(
+                          WomString("Hello") -> WomString("world!"),
+                          WomString("Goodbye") -> WomString("world!")
+                        )
+    )
+    val emptyWomMap = WomMap(WomMapType(WomStringType, WomStringType), Map.empty)
 
-    wdlValueToMetadataEvents(MetadataKey(workflowId, None, "root"), wdlArray).toList should contain theSameElementsInOrderAs List(
+    womValueToMetadataEvents(MetadataKey(workflowId, None, "root"),
+                             womMap
+    ).toList should contain theSameElementsInOrderAs List(
       MetadataEvent(MetadataKey(workflowId, None, "root:Hello"), MetadataValue("world!")),
       MetadataEvent(MetadataKey(workflowId, None, "root:Goodbye"), MetadataValue("world!"))
     )
 
-    wdlValueToMetadataEvents(MetadataKey(workflowId, None, "root"), emptyWdlMap).toList should contain theSameElementsAs List(
+    womValueToMetadataEvents(MetadataKey(workflowId, None, "root"),
+                             emptyWomMap
+    ).toList should contain theSameElementsAs List(
       MetadataEvent.empty(MetadataKey(workflowId, None, "root"))
     )
   }
 
-  it should "convert a primitive WdlValue to MetadataEvents" in {
+  it should "convert a primitive WomValue to MetadataEvents" in {
     import MetadataService._
     val workflowId = WorkflowId.randomId()
 
     val values = Table(
-      ("wdlValue", "metadataValue"),
-      (WdlString("hi"), MetadataValue("hi", MetadataString)),
-      (WdlInteger(1), MetadataValue("1", MetadataInt)),
-      (WdlFloat(1F), MetadataValue("1.0", MetadataNumber)),
-      (WdlBoolean(true), MetadataValue("true", MetadataBoolean))
+      ("womValue", "metadataValue"),
+      (WomString("hi"), MetadataValue("hi", MetadataString)),
+      (WomInteger(1), MetadataValue("1", MetadataInt)),
+      (WomFloat(1f), MetadataValue("1.0", MetadataNumber)),
+      (WomBoolean(true), MetadataValue("true", MetadataBoolean))
     )
 
-    forAll(values) { (wdlValue, metadataValue) =>
-      wdlValueToMetadataEvents(MetadataKey(workflowId, None, "root"), wdlValue).toList should contain theSameElementsAs List(
-        MetadataEvent(MetadataKey(workflowId, None, "root"), metadataValue)
+    forAll(values) { (womValue, metadataValue) =>
+      womValueToMetadataEvents(MetadataKey(workflowId, None, "root"),
+                               womValue
+      ).toList should contain theSameElementsAs List(
+        metadata.MetadataEvent(MetadataKey(workflowId, None, "root"), metadataValue)
       )
     }
   }
@@ -121,7 +136,8 @@ class MetadataServiceSpec extends FlatSpec with Matchers with TableDrivenPropert
 
     val (outerPrefix, outerCausedBys, outerFailureId) = validateExceptionMessage(events.head, workflowId, tMsg)
     val (cause1Prefix, cause1CausedBys, cause1FailureId) = validateExceptionMessage(events(1), workflowId, causeMsg)
-    val (cause2Prefix, cause2CausedBys, cause2FailureId) = validateExceptionMessage(events(2), workflowId, innerCauseMsg)
+    val (cause2Prefix, cause2CausedBys, cause2FailureId) =
+      validateExceptionMessage(events(2), workflowId, innerCauseMsg)
     events(3).key.key should be(s"$cause2Prefix[$cause2FailureId]$cause2CausedBys:causedBy[]")
 
     outerPrefix should be(pathToFailures)
@@ -165,7 +181,8 @@ class MetadataServiceSpec extends FlatSpec with Matchers with TableDrivenPropert
     runtimeCausedBys should be("")
 
     // Aggregate exception:
-    val (aggregatePrefix, aggregateCausedBys, aggregateFailureId) = validateExceptionMessage(events(1), workflowId, causeContext)
+    val (aggregatePrefix, aggregateCausedBys, aggregateFailureId) =
+      validateExceptionMessage(events(1), workflowId, causeContext)
     aggregatePrefix should be(pathToFailures)
     aggregateCausedBys should be(":causedBy[0]")
     aggregateFailureId should be(runtimeFailureId)
@@ -179,7 +196,8 @@ class MetadataServiceSpec extends FlatSpec with Matchers with TableDrivenPropert
 
     // cause2, caused by innerCause caused by []
     val (cause2Prefix, cause2CausedBys, cause2FailureId) = validateExceptionMessage(events(4), workflowId, cause2Msg)
-    val (innerCausePrefix, innerCauseCausedBys, innerCauseFailureIds) = validateExceptionMessage(events(5), workflowId, innerCauseMsg)
+    val (innerCausePrefix, innerCauseCausedBys, innerCauseFailureIds) =
+      validateExceptionMessage(events(5), workflowId, innerCauseMsg)
     cause2Prefix should be(pathToFailures)
     cause2CausedBys should be(":causedBy[0]:causedBy[1]")
     cause2FailureId should be(runtimeFailureId)
@@ -206,6 +224,9 @@ class MetadataServiceSpec extends FlatSpec with Matchers with TableDrivenPropert
         case failureMessageRegex(prefix, failureIndex, causedBys) => (prefix, causedBys, failureIndex)
         case _ => fail("Unexpected failure key format: " + k.key)
       }
-    case _ => fail("throwableToMetadataEvents generated a metadata event without a metadata value! Bad throwableToMetadataEvents! Very bad!")
+    case _ =>
+      fail(
+        "throwableToMetadataEvents generated a metadata event without a metadata value! Bad throwableToMetadataEvents! Very bad!"
+      )
   }
 }

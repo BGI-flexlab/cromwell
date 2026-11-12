@@ -1,43 +1,35 @@
 package cromwell.services.keyvalue.impl
 
-import akka.actor.Props
+import akka.actor.{ActorRef, Props}
 import com.typesafe.config.Config
 import cromwell.core.Dispatcher.ServiceDispatcher
-import cromwell.services.SingletonServicesStore
+import cromwell.core.LoadConfig
 import cromwell.services.keyvalue.KeyValueServiceActor
-import cromwell.services.keyvalue.KeyValueServiceActor._
+import net.ceedubs.ficus.Ficus._
 
-import scala.concurrent.Future
-
+import scala.concurrent.duration._
 object SqlKeyValueServiceActor {
-  def props(serviceConfig: Config, globalConfig: Config) = Props(SqlKeyValueServiceActor(serviceConfig, globalConfig)).withDispatcher(ServiceDispatcher)
+  def props(serviceConfig: Config, globalConfig: Config, serviceRegistryActor: ActorRef) =
+    Props(SqlKeyValueServiceActor(serviceConfig, globalConfig, serviceRegistryActor)).withDispatcher(ServiceDispatcher)
 }
 
-final case class SqlKeyValueServiceActor(serviceConfig: Config, globalConfig: Config)
-  extends KeyValueServiceActor with BackendKeyValueDatabaseAccess with SingletonServicesStore {
-  override implicit val ec = context.dispatcher
-  private implicit val system = context.system
+final case class SqlKeyValueServiceActor(serviceConfig: Config, globalConfig: Config, serviceRegistryActor: ActorRef)
+    extends KeyValueServiceActor {
 
-  override def doPut(put: KvPut): Future[KvResponse] = {
-    put.pair.value match {
-      case Some(backendVal) => updateBackendKeyValuePair(put.pair.key.workflowId,
-        put.pair.key.jobKey,
-        put.pair.key.key,
-        put.pair.value.get).map(_ => KvPutSuccess(put))
-      case None => Future.successful(KvFailure(put, new RuntimeException(s"Failed to find the value associated to key: ${put.pair.key.key}. This key cannot be added to the BackendKVStore.")))
-    }
-  }
+  private lazy val dbFlushRate = serviceConfig.as[Option[FiniteDuration]]("db-flush-rate").getOrElse(5.seconds)
+  private lazy val dbBatchSize = serviceConfig.as[Option[Int]]("db-batch-size").getOrElse(200)
 
-  override def doGet(get: KvGet): Future[KvResponse] = {
-    val backendValue = getBackendValueByKey(
-      get.key.workflowId,
-      get.key.jobKey,
-      get.key.key
+  override protected def kvReadActorProps =
+    SqlKeyValueReadActor.props(
+      LoadConfig.KeyValueReadThreshold,
+      serviceRegistryActor
     )
 
-    backendValue map {
-      case Some(maybeValue) => KvPair(get.key, Option(maybeValue))
-      case None => KvKeyLookupFailed(get)
-    }
-  }
+  override protected def kvWriteActorProps =
+    SqlKeyValueWriteActor.props(
+      LoadConfig.KeyValueWriteThreshold,
+      serviceRegistryActor,
+      dbFlushRate,
+      dbBatchSize
+    )
 }

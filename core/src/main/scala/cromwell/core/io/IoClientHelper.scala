@@ -1,14 +1,24 @@
 package cromwell.core.io
 
 import akka.actor.{Actor, ActorLogging, ActorRef}
+import com.typesafe.config.{Config, ConfigFactory}
+import common.util.Backoff
 import cromwell.core.actor.RobustClientHelper
+import cromwell.core.retry.SimpleExponentialBackoff
 
-import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration._
+import net.ceedubs.ficus.Ficus._
 
-trait IoClientHelper extends RobustClientHelper { this: Actor with ActorLogging with IoCommandBuilder =>
+trait IoClientHelper extends RobustClientHelper { this: Actor with ActorLogging =>
   def ioActor: ActorRef
 
-  private [core] def ioResponseReceive: Receive = {
+  lazy val defaultIoTimeout = RobustClientHelper.DefaultRequestLostTimeout
+
+  protected def config = ConfigFactory.load().as[Config]("system.io.backpressure-backoff")
+
+  override protected def initialBackoff(): Backoff = SimpleExponentialBackoff(config)
+
+  protected def ioResponseReceive: Receive = {
     case ack: IoAck[_] if hasTimeout(ack.command) =>
       cancelTimeout(ack.command)
       receive.apply(ack)
@@ -16,18 +26,16 @@ trait IoClientHelper extends RobustClientHelper { this: Actor with ActorLogging 
       cancelTimeout(context -> ack.command)
       receive.apply(context -> ack)
   }
-  
+
   def ioReceive = robustReceive orElse ioResponseReceive
-  
-  def sendIoCommand(ioCommand: IoCommand[_]) = {
-    sendIoCommandWithCustomTimeout(ioCommand, RobustClientHelper.DefaultRequestLostTimeout)
-  }
 
-  def sendIoCommandWithCustomTimeout(ioCommand: IoCommand[_], timeout: FiniteDuration) = {
+  def sendIoCommand(ioCommand: IoCommand[_]) =
+    sendIoCommandWithCustomTimeout(ioCommand, defaultIoTimeout)
+
+  def sendIoCommandWithCustomTimeout(ioCommand: IoCommand[_], timeout: FiniteDuration) =
     robustSend(ioCommand, ioActor, timeout)
-  }
 
-  def sendIoCommandWithContext[T](ioCommand: IoCommand[_], context: T, timeout: FiniteDuration = RobustClientHelper.DefaultRequestLostTimeout) = {
+  def sendIoCommandWithContext[T](ioCommand: IoCommand[_], context: T, timeout: FiniteDuration = defaultIoTimeout) =
     robustSend(context -> ioCommand, ioActor, timeout)
-  }
+
 }

@@ -3,7 +3,8 @@ package cromwell.backend.impl.sfs.config
 import com.typesafe.config.Config
 import cromwell.backend.impl.sfs.config.ConfigConstants._
 import net.ceedubs.ficus.Ficus._
-import wdl4s._
+import wdl.draft2.model.{WdlNamespace, WdlTask}
+import wom.core.WorkflowSource
 
 import scala.util.{Failure, Success}
 
@@ -19,37 +20,45 @@ class ConfigWdlNamespace(backendConfig: Config) {
   private val configRuntimeAttributes = backendConfig.as[Option[String]](RuntimeAttributesConfig).getOrElse("")
 
   private val submitCommandOption = backendConfig.as[Option[String]](SubmitConfig)
-  private val submitSourceOption = submitCommandOption.map(makeWdlSource(
-    SubmitTask, _, submitRuntimeAttributes + configRuntimeAttributes))
+  private val submitSourceOption =
+    submitCommandOption.map(makeWdlSource(SubmitTask, _, submitRuntimeAttributes + configRuntimeAttributes))
 
   private val submitDockerCommandOption = backendConfig.as[Option[String]](SubmitDockerConfig)
-  private val submitDockerSourceOption = submitDockerCommandOption.map(makeWdlSource(
-    SubmitDockerTask, _, submitRuntimeAttributes + submitDockerRuntimeAttributes + configRuntimeAttributes))
+  private val submitDockerSourceOption = submitDockerCommandOption.map(
+    makeWdlSource(SubmitDockerTask,
+                  _,
+                  submitRuntimeAttributes + submitDockerRuntimeAttributes + configRuntimeAttributes
+    )
+  )
 
   private val killCommandOption = backendConfig.as[Option[String]](KillConfig)
   private val killSourceOption = killCommandOption.map(makeWdlSource(KillTask, _, jobIdRuntimeAttributes))
 
+  private val killDockerCommandOption = backendConfig.as[Option[String]](KillDockerConfig)
+  private val killDockerSourceOption =
+    killDockerCommandOption.map(makeWdlSource(KillDockerTask, _, jobIdRuntimeAttributes))
+
   private val checkAliveCommandOption = backendConfig.as[Option[String]](CheckAliveConfig)
-  private val checkAliveSourceOption = checkAliveCommandOption.map(makeWdlSource(
-    CheckAliveTask, _, jobIdRuntimeAttributes))
+  private val checkAliveSourceOption =
+    checkAliveCommandOption.map(makeWdlSource(CheckAliveTask, _, jobIdRuntimeAttributes))
 
   private val workflowSource =
     s"""
        |${submitSourceOption getOrElse ""}
        |${submitDockerSourceOption getOrElse ""}
        |${killSourceOption getOrElse ""}
+       |${killDockerSourceOption getOrElse ""}
        |${checkAliveSourceOption getOrElse ""}
        |""".stripMargin.trim
 
   /**
     * The wdl namespace containing the submit, kill, and check alive tasks.
     */
-  val wdlNamespace = {
+  val wdlNamespace =
     WdlNamespace.loadUsingSource(workflowSource, None, None) match {
       case Success(ns) => ns
       case Failure(f) => throw new RuntimeException(s"Error parsing generated wdl:\n$workflowSource".stripMargin, f)
     }
-  }
 
   private val runtimeAttributesTask = makeTask(RuntimeAttributesTask, "", configRuntimeAttributes)
 
@@ -57,11 +66,13 @@ class ConfigWdlNamespace(backendConfig: Config) {
     * The declarations of runtime attributes.
     */
   val runtimeDeclarations = runtimeAttributesTask.declarations
+  val callCachedRuntimeAttributes =
+    backendConfig.as[Option[Map[String, Boolean]]](RuntimeAttributesCachingConfig).getOrElse(Map.empty)
 
 }
 
 object ConfigWdlNamespace {
-  private def makeWdlSource(taskName: String, command: String, declarations: String): WdlSource = {
+  private def makeWdlSource(taskName: String, command: String, declarations: String): WorkflowSource =
     s"""
        |task $taskName {
        |$declarations
@@ -70,9 +81,8 @@ object ConfigWdlNamespace {
        |}
        |}
        |""".stripMargin
-  }
 
-  private def makeTask(taskName: String, command: String, declarations: String): Task = {
+  private def makeTask(taskName: String, command: String, declarations: String): WdlTask = {
     val workflowSource = makeWdlSource(taskName, command, declarations)
     val wdlNamespace = WdlNamespace.loadUsingSource(workflowSource, None, None).get
     wdlNamespace.findTask(taskName).getOrElse(throw new RuntimeException(s"Couldn't find task $taskName"))
@@ -89,6 +99,7 @@ object ConfigWdlNamespace {
        |String $StdoutInput
        |String $StderrInput
        |String $ScriptInput
+       |String $JobShellInput
        |""".stripMargin
 
   /**
@@ -97,6 +108,10 @@ object ConfigWdlNamespace {
   private val submitDockerRuntimeAttributes =
     s"""
        |String $DockerCwdInput
+       |String $DockerCidInput
+       |String $DockerScriptInput
+       |String $DockerStdoutInput
+       |String $DockerStderrInput
        |""".stripMargin
 
   /**
@@ -105,5 +120,7 @@ object ConfigWdlNamespace {
   private val jobIdRuntimeAttributes =
     s"""
        |String $JobIdInput
+       |String $DockerCidInput
+       |String $JobShellInput
        |""".stripMargin
 }

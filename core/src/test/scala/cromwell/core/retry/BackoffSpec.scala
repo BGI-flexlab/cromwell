@@ -1,11 +1,15 @@
 package cromwell.core.retry
 
 import com.google.api.client.util.ExponentialBackOff.Builder
-import org.scalatest.{FlatSpec, Matchers}
+import com.typesafe.config.ConfigFactory
+import common.assertion.CromwellTimeoutSpec
+import org.scalatest.flatspec.AnyFlatSpec
+import org.scalatest.matchers.should.Matchers
 
+import scala.jdk.CollectionConverters._
 import scala.concurrent.duration._
 
-class BackoffSpec extends FlatSpec with Matchers {
+class BackoffSpec extends AnyFlatSpec with CromwellTimeoutSpec with Matchers {
 
   it should "honor initial gap" in {
     val exponentialBackoff = new InitialGapBackoff(
@@ -14,10 +18,9 @@ class BackoffSpec extends FlatSpec with Matchers {
         .setInitialIntervalMillis(1.second.toMillis.toInt)
         .setMaxIntervalMillis(2.seconds.toMillis.toInt)
         .setMaxElapsedTimeMillis(Integer.MAX_VALUE)
-        .setRandomizationFactor(0D)
+        .setRandomizationFactor(0d)
         .build()
     )
-
 
     exponentialBackoff.backoffMillis shouldBe 3.seconds.toMillis
     exponentialBackoff.next.backoffMillis shouldBe 1.second.toMillis
@@ -29,7 +32,7 @@ class BackoffSpec extends FlatSpec with Matchers {
         .setInitialIntervalMillis(1.second.toMillis.toInt)
         .setMaxIntervalMillis(2.seconds.toMillis.toInt)
         .setMaxElapsedTimeMillis(Integer.MAX_VALUE)
-        .setRandomizationFactor(0D)
+        .setRandomizationFactor(0d)
         .build()
     ).backoffMillis shouldBe 1.second.toMillis
   }
@@ -42,10 +45,27 @@ class BackoffSpec extends FlatSpec with Matchers {
           .setInitialIntervalMillis(1.second.toMillis.toInt)
           .setMaxIntervalMillis(2.seconds.toMillis.toInt)
           .setMaxElapsedTimeMillis(Integer.MAX_VALUE)
-          .setRandomizationFactor(0D)
+          .setRandomizationFactor(0d)
           .build()
       )
     }
+  }
+
+  it should "parse config" in {
+    val config = ConfigFactory.parseMap(
+      Map[String, Any](
+        "min" -> "5 seconds",
+        "max" -> "30 seconds",
+        "multiplier" -> 6d,
+        "randomization-factor" -> 0d
+      ).asJava
+    )
+
+    val backoff = SimpleExponentialBackoff(config)
+    backoff.googleBackoff.getCurrentIntervalMillis shouldBe 5.seconds.toMillis.toInt
+    backoff.googleBackoff.getMaxIntervalMillis shouldBe 30.seconds.toMillis.toInt
+    backoff.googleBackoff.getMultiplier shouldBe 6d
+    backoff.googleBackoff.getRandomizationFactor shouldBe 0d
   }
 
 }

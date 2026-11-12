@@ -1,31 +1,23 @@
 package cromwell.backend.validation
 
-import cats.syntax.validated._
-import lenthall.validation.ErrorOr.ErrorOr
-import wdl4s.values.{WdlString, WdlValue}
+import wom.RuntimeAttributesKeys
 
 /**
-  * Validates the "docker" runtime attribute as a String, returning it as `String`.
-  *
-  * `instance` returns an validation that errors when no attribute is specified.
-  *
-  * There is no default, however `optional` can be used return the validated value as an `Option`, wrapped in a `Some`,
-  * if present, or `None` if not found.
+  * Different WDL versions support different names for the runtime attribute that specifies the container image to use.
+  * WDL 1.0 supports only `docker`, WDL 1.1 and later support `container` (preferred) and `docker` (deprecated).
   */
 object DockerValidation {
-  lazy val instance: RuntimeAttributesValidation[String] = new DockerValidation
-  lazy val optional: OptionalRuntimeAttributesValidation[String] = instance.optional
+  lazy val instance: OptionalRuntimeAttributesValidation[Containers] = new DockerValidation
 }
 
-class DockerValidation extends StringRuntimeAttributesValidation(RuntimeAttributesKeys.DockerKey) {
-  override protected def usedInCallCaching: Boolean = true
+class DockerValidation extends ContainersValidation {
+  override val key: String = RuntimeAttributesKeys.DockerKey
+}
 
-  override protected def missingValueMessage: String = "Can't find an attribute value for key docker"
+object ContainerValidation {
+  lazy val instance: OptionalRuntimeAttributesValidation[Containers] = new ContainerValidation
+}
 
-  override protected def invalidValueMessage(value: WdlValue): String = super.missingValueMessage
-
-  // NOTE: Docker's current test specs don't like WdlInteger, etc. auto converted to WdlString.
-  override protected def validateValue: PartialFunction[WdlValue, ErrorOr[String]] = {
-    case WdlString(value) => value.validNel
-  }
+class ContainerValidation extends ContainersValidation {
+  override val key: String = RuntimeAttributesKeys.ContainerKey
 }

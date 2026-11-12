@@ -2,6 +2,8 @@ package cromwell.database.slick.tables
 
 import cromwell.database.sql.tables.CallCachingEntry
 
+import java.sql.Timestamp
+
 trait CallCachingEntryComponent {
 
   this: DriverComponent =>
@@ -9,11 +11,11 @@ trait CallCachingEntryComponent {
   import driver.api._
 
   class CallCachingEntries(tag: Tag) extends Table[CallCachingEntry](tag, "CALL_CACHING_ENTRY") {
-    def callCachingEntryId = column[Int]("CALL_CACHING_ENTRY_ID", O.PrimaryKey, O.AutoInc)
+    def callCachingEntryId = column[Long]("CALL_CACHING_ENTRY_ID", O.PrimaryKey, O.AutoInc)
 
-    def workflowExecutionUuid = column[String]("WORKFLOW_EXECUTION_UUID")
+    def workflowExecutionUuid = column[String]("WORKFLOW_EXECUTION_UUID", O.Length(255))
 
-    def callFullyQualifiedName = column[String]("CALL_FULLY_QUALIFIED_NAME")
+    def callFullyQualifiedName = column[String]("CALL_FULLY_QUALIFIED_NAME", O.Length(255))
 
     def jobIndex = column[Int]("JOB_INDEX")
 
@@ -22,39 +24,67 @@ trait CallCachingEntryComponent {
     def returnCode = column[Option[Int]]("RETURN_CODE")
 
     def allowResultReuse = column[Boolean]("ALLOW_RESULT_REUSE", O.Default(true))
-    
-    override def * = (workflowExecutionUuid, callFullyQualifiedName, jobIndex, jobAttempt, returnCode, allowResultReuse,
-      callCachingEntryId.?) <> (CallCachingEntry.tupled, CallCachingEntry.unapply)
+
+    def createdAt = column[Timestamp]("CREATED_AT")
+
+    override def * = (workflowExecutionUuid,
+                      callFullyQualifiedName,
+                      jobIndex,
+                      jobAttempt,
+                      returnCode,
+                      allowResultReuse,
+                      callCachingEntryId.?,
+                      createdAt
+    ) <> (CallCachingEntry.tupled, CallCachingEntry.unapply)
 
     def ucCallCachingEntryWeuCfqnJi =
-      index("UC_CALL_CACHING_ENTRY_WEU_CFQN_JI", (workflowExecutionUuid, callFullyQualifiedName, jobIndex),
-        unique = true)
+      index("UC_CALL_CACHING_ENTRY_WEU_CFQN_JI",
+            (workflowExecutionUuid, callFullyQualifiedName, jobIndex),
+            unique = true
+      )
+
+    def ixCallCachingEntryCa = index("IX_CALL_CACHING_ENTRY_CA", createdAt, unique = false)
   }
 
   protected val callCachingEntries = TableQuery[CallCachingEntries]
 
   val callCachingEntryIdsAutoInc = callCachingEntries returning callCachingEntries.map(_.callCachingEntryId)
 
-  val callCachingEntriesForId = Compiled(
-    (callCachingEntryId: Rep[Int]) => for {
+  val callCachingEntriesForId = Compiled((callCachingEntryId: Rep[Long]) =>
+    for {
       callCachingEntry <- callCachingEntries
       if callCachingEntry.callCachingEntryId === callCachingEntryId
     } yield callCachingEntry
   )
 
-  val allowResultReuseForCallCachingEntryId = Compiled(
-    (callCachingEntryId: Rep[Int]) => for {
+  val allowResultReuseForCallCachingEntryId = Compiled((callCachingEntryId: Rep[Long]) =>
+    for {
       callCachingEntry <- callCachingEntries
       if callCachingEntry.callCachingEntryId === callCachingEntryId
     } yield callCachingEntry.allowResultReuse
   )
 
-  val callCachingEntriesForWorkflowFqnIndex = Compiled(
-    (workflowId: Rep[String], callFqn: Rep[String],  jobIndex: Rep[Int]) => for {
+  val callCachingEntriesForWorkflowFqnIndex =
+    Compiled((workflowId: Rep[String], callFqn: Rep[String], jobIndex: Rep[Int]) =>
+      for {
         callCachingEntry <- callCachingEntries
         if callCachingEntry.workflowExecutionUuid === workflowId
         if callCachingEntry.callFullyQualifiedName === callFqn
         if callCachingEntry.jobIndex === jobIndex
       } yield callCachingEntry
+    )
+
+  val callCachingEntryIdsForWorkflowId = Compiled((workflowId: Rep[String]) =>
+    for {
+      callCachingEntry <- callCachingEntries
+      if callCachingEntry.workflowExecutionUuid === workflowId
+    } yield callCachingEntry.callCachingEntryId
+  )
+
+  val allowResultReuseForWorkflowId = Compiled((workflowId: Rep[String]) =>
+    for {
+      callCachingEntry <- callCachingEntries
+      if callCachingEntry.workflowExecutionUuid === workflowId
+    } yield callCachingEntry.allowResultReuse
   )
 }

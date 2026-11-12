@@ -1,27 +1,27 @@
 package cromwell.backend.validation
 
-import wdl4s.types.{WdlArrayType, WdlBooleanType, WdlIntegerType, WdlType}
+import wom.types._
 
 object ContinueOnReturnCode {
-  val validWdlTypes = Set[WdlType](WdlArrayType(WdlIntegerType), WdlBooleanType, WdlIntegerType)
+  val validWdlTypes = Set[WomType](WomArrayType(WomIntegerType), WomBooleanType, WomIntegerType)
 }
 
 /**
   * Decides if a call/job continues upon a specific return code.
   */
 sealed trait ContinueOnReturnCode {
+
   /**
     * Returns true if the call is a success based on the return code.
     *
     * @param returnCode Return code from the process / script.
     * @return True if the call is a success.
     */
-  final def continueFor(returnCode: Int): Boolean = {
+  final def continueFor(returnCode: Int): Boolean =
     this match {
       case ContinueOnReturnCodeFlag(continue) => continue || returnCode == 0
       case ContinueOnReturnCodeSet(returnCodes) => returnCodes.contains(returnCode)
     }
-  }
 }
 
 /**

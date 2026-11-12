@@ -1,5 +1,6 @@
 package cromwell.backend.sfs
 
+import cromwell.backend.async.ExecutionHandle
 import cromwell.backend.standard.StandardAsyncJob
 import cromwell.core.path.Path
 
@@ -7,29 +8,26 @@ trait BackgroundAsyncJobExecutionActor extends SharedFileSystemAsyncJobExecution
 
   lazy val backgroundScript = jobPaths.script.plusExt("background")
 
-  override def writeScriptContents(): Unit = {
-    super.writeScriptContents()
-    writeBackgroundScriptContents()
-  }
+  override def writeScriptContents(): Either[ExecutionHandle, Unit] =
+    super.writeScriptContents().flatMap(_ => writeBackgroundScriptContents())
 
   /**
     * Run the command via bash in the background, and echo the PID.
     */
-  private def writeBackgroundScriptContents(): Unit = {
+  private def writeBackgroundScriptContents(): Either[ExecutionHandle, Unit] = {
     val backgroundCommand = redirectOutputs(processArgs.argv.mkString("'", "' '", "'"))
     // $! contains the previous background command's process id (PID)
-    backgroundScript.write(
-      s"""|#!/bin/bash
-          |BACKGROUND_COMMAND &
-          |echo $$!
-          |""".stripMargin.replace("BACKGROUND_COMMAND", backgroundCommand))
-    ()
+    backgroundScript.write(s"""|#!/bin/bash
+                               |BACKGROUND_COMMAND &
+                               |echo $$!
+                               |""".stripMargin.replace("BACKGROUND_COMMAND", backgroundCommand))
+    Right(())
   }
 
   override def makeProcessRunner(): ProcessRunner = {
-    val stdout = jobPaths.stdout.plusExt("background")
-    val stderr = jobPaths.stderr.plusExt("background")
-    val argv = Seq("/bin/bash", backgroundScript)
+    val stdout = standardPaths.output.plusExt("background")
+    val stderr = standardPaths.error.plusExt("background")
+    val argv: Seq[Any] = Seq("/bin/bash", backgroundScript)
     new ProcessRunner(argv, stdout, stderr)
   }
 
@@ -38,9 +36,8 @@ trait BackgroundAsyncJobExecutionActor extends SharedFileSystemAsyncJobExecution
     StandardAsyncJob(pid)
   }
 
-  override def checkAliveArgs(job: StandardAsyncJob): SharedFileSystemCommand = {
+  override def checkAliveArgs(job: StandardAsyncJob): SharedFileSystemCommand =
     SharedFileSystemCommand("ps", job.jobId)
-  }
 
   override def killArgs(job: StandardAsyncJob): SharedFileSystemCommand = {
     val killScript = jobPaths.script.plusExt("kill")
@@ -52,19 +49,20 @@ trait BackgroundAsyncJobExecutionActor extends SharedFileSystemAsyncJobExecution
     /*
     Use pgrep to find the children of a process, and recursively kill the children before killing the parent.
      */
-    killScript.write(
-      s"""|#!/bin/bash
-          |kill_children() {
-          |  local pid=$$1
-          |  for cpid in $$(pgrep -P $$pid); do
-          |    kill_children $$cpid
-          |  done
-          |  echo killing $$pid
-          |  kill $$pid
-          |}
-          |
-          |kill_children ${job.jobId}
-          |""".stripMargin)
+    killScript.write(s"""|#!/bin/bash
+                         |kill_tree() {
+                         |  local pid
+                         |  local cpid
+                         |  pid=$$1
+                         |  for cpid in $$(pgrep -P "$$pid"); do
+                         |    kill_tree "$$cpid"
+                         |  done
+                         |  echo killing "$$pid"
+                         |  kill "$$pid"
+                         |}
+                         |
+                         |kill_tree "${job.jobId}"
+                         |""".stripMargin)
     ()
   }
 }

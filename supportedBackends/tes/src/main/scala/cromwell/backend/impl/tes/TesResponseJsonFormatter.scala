@@ -7,15 +7,34 @@ final case class MinimalTaskView(id: String, state: String)
 final case class CancelTaskResponse()
 
 object TesResponseJsonFormatter extends DefaultJsonProtocol {
-  implicit val resourcesFormat = jsonFormat5(Resources)
-  implicit val taskParameterFormat = jsonFormat6(TaskParameter)
-  implicit val portsFormat = jsonFormat2(Ports)
-  implicit val executorFormat = jsonFormat8(Executor)
-  implicit val executorLogFormat = jsonFormat7(ExecutorLog)
-  implicit val outputFileLogFormat = jsonFormat3(OutputFileLog)
-  implicit val taskLogFormat = jsonFormat5(TaskLog)
-  implicit val taskFormat = jsonFormat12(Task)
-  implicit val minimalTaskView = jsonFormat2(MinimalTaskView)
-  implicit val createTaskResponseFormat = jsonFormat1(CreateTaskResponse)
-  implicit val cancelTaskResponseFormat = jsonFormat0(CancelTaskResponse)
+
+  /** OutputFileLog is partly defined by size_byte: Int which is supplied as string as described by the TES spec.
+   * We create a custom deserializer to read the size_byte string and turn it into the Int Cromwell expects
+   */
+  implicit object customJsonFormatOutputFileLog extends RootJsonFormat[OutputFileLog] {
+    def write(obj: OutputFileLog): JsValue =
+      JsObject(
+        "url" -> JsString(obj.url),
+        "path" -> JsString(obj.path),
+        "size_bytes" -> JsNumber(obj.size_bytes)
+      )
+
+    def read(value: JsValue): OutputFileLog =
+      value.asJsObject.getFields("url", "path", "size_bytes") match {
+        case Seq(JsString(url), JsString(path), JsString(size_bytes)) =>
+          OutputFileLog(url, path, size_bytes.toInt)
+        case Seq(JsString(url), JsString(path)) => OutputFileLog(url, path, 0)
+        case _ => throw DeserializationException("Cannot deserialize OutputFileLog")
+      }
+  }
+  implicit val resourcesFormat: RootJsonFormat[Resources] = jsonFormat6(Resources)
+  implicit val inputFormat: RootJsonFormat[Input] = jsonFormat6(Input)
+  implicit val outputFormat: RootJsonFormat[Output] = jsonFormat5(Output)
+  implicit val executorFormat: RootJsonFormat[Executor] = jsonFormat7(Executor)
+  implicit val executorLogFormat: RootJsonFormat[ExecutorLog] = jsonFormat5(ExecutorLog)
+  implicit val taskLogFormat: RootJsonFormat[TaskLog] = jsonFormat6(TaskLog)
+  implicit val taskFormat: RootJsonFormat[Task] = jsonFormat11(Task)
+  implicit val minimalTaskView: RootJsonFormat[MinimalTaskView] = jsonFormat2(MinimalTaskView)
+  implicit val createTaskResponseFormat: RootJsonFormat[CreateTaskResponse] = jsonFormat1(CreateTaskResponse)
+  implicit val cancelTaskResponseFormat: RootJsonFormat[CancelTaskResponse] = jsonFormat0(CancelTaskResponse)
 }
